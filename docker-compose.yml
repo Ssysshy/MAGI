@@ -1,0 +1,44 @@
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: magi_root_password
+      MYSQL_DATABASE: magi_console
+      MYSQL_USER: magi
+      MYSQL_PASSWORD: magi_password
+    ports:
+      - "3306:3306"
+    volumes:
+      - magi_mysql_data:/var/lib/mysql
+
+  backend:
+    build:
+      context: .
+      dockerfile: apps/backend/Dockerfile
+    environment:
+      DATABASE_URL: mysql://magi:magi_password@mysql:3306/magi_console
+      JWT_SECRET: replace_with_32_chars_secret_value
+      API_KEY_ENCRYPTION_SECRET: replace_with_32_chars_key_value
+      SYSTEM_AI_PROVIDER: openai
+      SYSTEM_AI_BASE_URL: https://api.openai.com/v1
+      SYSTEM_AI_MODEL: gpt-4.1-mini
+      SYSTEM_AI_API_KEY: replace_with_system_key
+      FRONTEND_ORIGIN: http://localhost:3000
+    ports:
+      - "3001:3001"
+    depends_on:
+      - mysql
+
+  frontend:
+    build:
+      context: .
+      dockerfile: apps/frontend/Dockerfile
+    environment:
+      VITE_API_BASE_URL: http://localhost:3001
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  magi_mysql_data:
