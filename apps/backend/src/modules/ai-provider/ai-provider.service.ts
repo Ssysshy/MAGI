@@ -18,36 +18,58 @@ export interface UsableAiProviderConfig {
   apiKey: string;
 }
 
+const toMaskedConfig = (config: {
+  id: string;
+  provider: string;
+  baseUrl: string;
+  model: string;
+  enabled: boolean;
+}): MaskedAiProviderConfig => ({
+  id: config.id,
+  provider: config.provider,
+  baseUrl: config.baseUrl,
+  model: config.model,
+  enabled: config.enabled,
+  apiKeyMasked: '********',
+});
+
 export const createAiProviderService = (prisma: PrismaClient) => ({
   async save(userId: string, input: SaveAiProviderConfigInput): Promise<MaskedAiProviderConfig> {
-    // 每个用户只允许一份个人 AI 配置；重复保存走 upsert 覆盖当前配置。
-    const config = await prisma.aiProviderConfig.upsert({
+    const existingConfig = await prisma.aiProviderConfig.findUnique({ where: { userId } });
+
+    if (!existingConfig) {
+      if (!input.apiKey) {
+        const error = new Error('API_KEY_REQUIRED') as Error & { statusCode: number };
+        error.statusCode = 400;
+        throw error;
+      }
+
+      const config = await prisma.aiProviderConfig.create({
+        data: {
+          userId,
+          provider: input.provider,
+          baseUrl: input.baseUrl,
+          model: input.model,
+          apiKeyEncrypted: encryptText(input.apiKey),
+          enabled: input.enabled,
+        },
+      });
+
+      return toMaskedConfig(config);
+    }
+
+    const config = await prisma.aiProviderConfig.update({
       where: { userId },
-      create: {
-        userId,
+      data: {
         provider: input.provider,
         baseUrl: input.baseUrl,
         model: input.model,
-        apiKeyEncrypted: encryptText(input.apiKey),
         enabled: input.enabled,
-      },
-      update: {
-        provider: input.provider,
-        baseUrl: input.baseUrl,
-        model: input.model,
-        apiKeyEncrypted: encryptText(input.apiKey),
-        enabled: input.enabled,
+        ...(input.apiKey ? { apiKeyEncrypted: encryptText(input.apiKey) } : {}),
       },
     });
 
-    return {
-      id: config.id,
-      provider: config.provider,
-      baseUrl: config.baseUrl,
-      model: config.model,
-      enabled: config.enabled,
-      apiKeyMasked: '********',
-    };
+    return toMaskedConfig(config);
   },
 
   async getMasked(userId: string): Promise<MaskedAiProviderConfig | null> {
@@ -58,14 +80,7 @@ export const createAiProviderService = (prisma: PrismaClient) => ({
     }
 
     // API Key 永远不回传明文，只告诉前端配置是否存在。
-    return {
-      id: config.id,
-      provider: config.provider,
-      baseUrl: config.baseUrl,
-      model: config.model,
-      enabled: config.enabled,
-      apiKeyMasked: '********',
-    };
+    return toMaskedConfig(config);
   },
 
   async getUsableConfig(userId: string): Promise<UsableAiProviderConfig | null> {

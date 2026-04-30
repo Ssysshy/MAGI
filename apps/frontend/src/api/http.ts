@@ -1,6 +1,12 @@
 import Taro from '@tarojs/taro';
 
-const apiBaseUrl = process.env.VITE_API_BASE_URL || 'http://localhost:3001';
+interface ViteEnvMeta {
+  env?: {
+    VITE_API_BASE_URL?: string;
+  };
+}
+
+const apiBaseUrl = (import.meta as ImportMeta & ViteEnvMeta).env?.VITE_API_BASE_URL || 'http://localhost:3001';
 
 export const requestJson = async <T>(url: string, options: Taro.request.Option = {}): Promise<T> => {
   // 所有接口统一走这里，确保 Cookie 会话和 JSON Header 行为一致。

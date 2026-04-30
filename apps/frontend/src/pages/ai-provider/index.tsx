@@ -42,8 +42,15 @@ const AiProviderPage = (): JSX.Element => {
 
   const handleSave = async (): Promise<void> => {
     try {
-      // apiKey 只提交给后端加密保存，前端不做持久化。
-      await saveAiProviderConfig({ provider, baseUrl, model, apiKey, enabled });
+      const nextApiKey = apiKey.trim();
+      // apiKey 只在用户输入新值时提交，避免覆盖后端已有密钥。
+      await saveAiProviderConfig({
+        provider,
+        baseUrl,
+        model,
+        enabled,
+        ...(nextApiKey ? { apiKey: nextApiKey } : {}),
+      });
       setStatus('SAVED');
     } catch {
       setStatus('FORBIDDEN');

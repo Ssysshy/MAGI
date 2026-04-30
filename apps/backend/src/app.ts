@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import cookie from '@fastify/cookie';
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
+import { ZodError } from 'zod';
 import prismaPlugin from './plugins/prisma.js';
 import authPlugin from './plugins/auth.js';
 import { env } from './config/env.js';
@@ -12,6 +13,18 @@ import { decisionRoutes } from './modules/decision/decision.routes.js';
 
 export const buildApp = async (): Promise<FastifyInstance> => {
   const app = Fastify({ logger: true });
+
+  app.setErrorHandler((error, _request, reply): void => {
+    if (error instanceof ZodError) {
+      reply.status(400).send({ error: 'VALIDATION_ERROR' });
+      return;
+    }
+
+    const statusCode = error.statusCode ?? 500;
+    reply.status(statusCode).send({
+      error: statusCode >= 500 ? 'INTERNAL_SERVER_ERROR' : error.message,
+    });
+  });
 
   // 注册顺序保持为：跨域/基础中间件 -> 数据库 -> 鉴权 -> 业务路由。
   await app.register(cors, {

@@ -4,7 +4,7 @@ export interface AiProviderConfigPayload {
   provider: string;
   baseUrl: string;
   model: string;
-  apiKey: string;
+  apiKey?: string;
   enabled: boolean;
 }
 
