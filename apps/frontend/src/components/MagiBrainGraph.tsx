@@ -13,6 +13,7 @@ export interface MagiBrainGraphProps {
 
 const getBrainClass = (brainType: string, finalStatus: FinalStatus, analyses: BrainAnalysis[]): string => {
   const analysis = analyses.find((item: BrainAnalysis): boolean => item.brainType === brainType);
+  // Melchior 在参考图中固定承担红色否决位；最终否决时全部按高风险态处理。
   const isNegative = analysis?.stance === 'reject' || finalStatus === 'rejected' || brainType === 'melchior';
 
   return isNegative ? 'brain brain-red' : 'brain brain-green';

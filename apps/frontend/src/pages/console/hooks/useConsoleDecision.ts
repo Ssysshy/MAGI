@@ -16,6 +16,7 @@ export const useConsoleDecision = (): UseConsoleDecisionResult => {
   const [loading, setLoading] = useState<boolean>(false);
 
   useLoad((query: Record<string, string | undefined>): void => {
+    // 历史记录页带 id 回到主控台时，用服务端快照覆盖默认裁决。
     if (!query.id) {
       return;
     }
@@ -32,12 +33,14 @@ export const useConsoleDecision = (): UseConsoleDecisionResult => {
   const submitDecision = useCallback(async (): Promise<void> => {
     const trimmedQuestion = question.trim();
 
+    // 空问题和重复点击都不触发请求，保持一次问题一次裁决。
     if (trimmedQuestion.length < 2 || loading) {
       return;
     }
 
     setLoading(true);
     setStatus('QUESTION ACCEPTED');
+    // 先给用户看到接收态，再进入分析态，贴近主控台执行流程。
     window.setTimeout((): void => setStatus('ANALYZING'), 260);
 
     try {
@@ -45,12 +48,14 @@ export const useConsoleDecision = (): UseConsoleDecisionResult => {
       setDecision(session);
       setStatus('RESOLUTION READY');
     } catch {
+      // 当前接口失败大概率是未登录或会话失效，直接引导到登录页。
       void Taro.navigateTo({ url: '/pages/login/index' });
     } finally {
       setLoading(false);
     }
   }, [loading, question]);
 
+  // 三脑详情固定按 Melchior、Balthasar、Casper 展示，避免接口返回顺序影响阅读。
   const analyses = useMemo((): BrainAnalysis[] => sortAnalyses(decision.analyses), [decision.analyses]);
 
   return {

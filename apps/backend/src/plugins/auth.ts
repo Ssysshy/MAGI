@@ -19,6 +19,7 @@ declare module 'fastify' {
 
 const authPlugin: FastifyPluginAsync = async (app) => {
   app.decorate('authenticate', async (request: FastifyRequest): Promise<void> => {
+    // 所有受保护接口都从 HttpOnly Cookie 读取会话，避免前端直接持有 token。
     const token = request.cookies.magi_session;
 
     if (!token) {
@@ -27,6 +28,7 @@ const authPlugin: FastifyPluginAsync = async (app) => {
       throw error;
     }
 
+    // 只把 userId 挂到 request，业务模块再自行读取所需用户字段。
     const payload = jwt.verify(token, env.JWT_SECRET) as SessionPayload;
     request.userId = payload.userId;
   });

@@ -14,12 +14,14 @@ export const authRoutes = async (app: FastifyInstance): Promise<void> => {
 
   app.post('/api/auth/register', async (request, reply) => {
     const session = await service.register(authInputSchema.parse(request.body));
+    // 登录态只写入 Cookie，响应体只返回安全的用户字段。
     reply.setCookie('magi_session', session.token, cookieOptions);
     return session.user;
   });
 
   app.post('/api/auth/login', async (request, reply) => {
     const session = await service.login(authInputSchema.parse(request.body));
+    // 登录和注册使用同一 Cookie 策略，前端无需区分会话来源。
     reply.setCookie('magi_session', session.token, cookieOptions);
     return session.user;
   });

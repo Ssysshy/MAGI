@@ -3,6 +3,7 @@ import { saveAiProviderConfigSchema } from './ai-provider.schema.js';
 import { createAiProviderService, type MaskedAiProviderConfig } from './ai-provider.service.js';
 
 const assertAllowed = async (app: FastifyInstance, userId: string): Promise<void> => {
+  // 权限统一在路由入口拦截，service 只负责配置读写。
   const user = await app.prisma.user.findUniqueOrThrow({
     where: { id: userId },
     select: { canConfigureAiProvider: true },

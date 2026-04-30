@@ -16,12 +16,14 @@ const HistoryPage = (): JSX.Element => {
   const [sessions, setSessions] = useState<DecisionSession[]>([]);
 
   useEffect((): void => {
+    // 历史记录只读当前用户数据；失败时说明会话不可用，回登录页。
     void listDecisionSessions()
       .then((items: DecisionSession[]): void => setSessions(items))
       .catch((): void => { void Taro.redirectTo({ url: '/pages/login/index' }); });
   }, []);
 
   const openSession = (id: string): void => {
+    // 主控台负责根据 id 回显完整裁决快照。
     void Taro.redirectTo({ url: `/pages/console/index?id=${id}` });
   };
 

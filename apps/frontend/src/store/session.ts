@@ -14,6 +14,7 @@ export const sessionState: SessionState = {
 };
 
 export const loadSession = async (): Promise<SessionState> => {
+  // 用户信息和能力互不依赖，并行加载减少进入主控台前的等待。
   const [user, capabilities] = await Promise.all([
     getCurrentUser(),
     getCapabilities(),

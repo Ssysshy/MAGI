@@ -25,6 +25,7 @@ const AiProviderPage = (): JSX.Element => {
   const [status, setStatus] = useState<string>('');
 
   useEffect((): void => {
+    // 未授权用户访问该接口会返回 403，这里直接退回主控台。
     void getAiProviderConfig()
       .then((config): void => {
         if (!config) {
@@ -41,6 +42,7 @@ const AiProviderPage = (): JSX.Element => {
 
   const handleSave = async (): Promise<void> => {
     try {
+      // apiKey 只提交给后端加密保存，前端不做持久化。
       await saveAiProviderConfig({ provider, baseUrl, model, apiKey, enabled });
       setStatus('SAVED');
     } catch {

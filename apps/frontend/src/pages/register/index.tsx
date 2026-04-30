@@ -17,6 +17,7 @@ const RegisterPage = (): JSX.Element => {
 
   const handleRegister = async (): Promise<void> => {
     try {
+      // 注册接口会同时写入会话 Cookie，因此注册成功后无需再次登录。
       await register({ email, password });
       void Taro.redirectTo({ url: '/pages/console/index' });
     } catch {

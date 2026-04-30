@@ -17,12 +17,14 @@ const toPublicUser = (user: User): AuthSession['user'] => ({
 });
 
 export const createAuthService = (prisma: PrismaClient) => {
+  // token 只承载 userId；权限和用户信息每次从数据库读取，避免权限变更后旧 token 失效不及时。
   const createToken = (userId: string): string => jwt.sign({ userId }, env.JWT_SECRET, { expiresIn: '7d' });
 
   return {
     async register(input: AuthInput): Promise<AuthSession> {
       const existing = await prisma.user.findUnique({ where: { email: input.email } });
 
+      // 邮箱唯一性在业务层提前返回 409，避免 Prisma 错误直接暴露给接口层。
       if (existing) {
         const error = new Error('EMAIL_EXISTS') as Error & { statusCode: number };
         error.statusCode = 409;
@@ -45,6 +47,7 @@ export const createAuthService = (prisma: PrismaClient) => {
     async login(input: AuthInput): Promise<AuthSession> {
       const user = await prisma.user.findUnique({ where: { email: input.email } });
 
+      // 账号不存在和密码错误统一返回，避免泄露邮箱是否已注册。
       if (!user || !(await argon2.verify(user.passwordHash, input.password))) {
         const error = new Error('INVALID_CREDENTIALS') as Error & { statusCode: number };
         error.statusCode = 401;

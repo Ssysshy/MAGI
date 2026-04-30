@@ -55,6 +55,7 @@ export const createRefusedDecision = (
   question: string,
   reason: string,
 ): DecisionDraft => ({
+  // 统一降级出口：LLM 超时、格式错误、调用失败都落到拒绝裁决。
   userId,
   question,
   questionType: 'strategy',
@@ -105,6 +106,7 @@ export const createRefusedDecision = (
 });
 
 const normalizeStatus = (status: string): FinalStatus => {
+  // 模型返回非白名单状态时不做猜测，直接按拒绝裁决处理。
   if (status === 'approved' || status === 'rejected' || status === 'deferred' || status === 'refused') {
     return status;
   }
@@ -116,6 +118,7 @@ export const orchestrateDecision = async (
   input: OrchestrateDecisionInput,
 ): Promise<DecisionDraft> => decisionLimit(async (): Promise<DecisionDraft> => {
   try {
+    // decisionLimit 控制完整裁决并发，llmLimiter 控制实际 LLM 请求频率。
     const draft = await llmLimiter.schedule(() => requestLlmJson<DecisionDraft>(
       input.config,
       [
@@ -138,6 +141,7 @@ export const orchestrateDecision = async (
       25000,
     ));
 
+    // 服务端重新覆盖 userId/question，防止模型回写不可信字段污染持久化数据。
     return decisionDraftSchema.parse({
       ...draft,
       userId: input.userId,
@@ -145,6 +149,7 @@ export const orchestrateDecision = async (
       finalStatus: normalizeStatus(draft.finalStatus),
     });
   } catch {
+    // 对用户保持稳定响应形态，不把 provider 错误、超时、JSON 错误直接抛到前端。
     return createRefusedDecision(input.userId, input.question, 'LLM 调用失败，系统拒绝裁决。');
   }
 });

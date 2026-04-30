@@ -54,6 +54,7 @@ export const BRAIN_ANALYSIS_META: Record<BrainType, BrainAnalysisMeta> = {
   },
 };
 
+// 默认数据用于首屏复刻参考图，同时作为未登录/未裁决时的可读初始态。
 export const DEFAULT_ANALYSES: BrainAnalysis[] = [
   {
     brainType: 'melchior',
@@ -98,4 +99,5 @@ export const DEFAULT_DECISION: DecisionSession = {
   createdAt: new Date().toISOString(),
 };
 
+// 视觉稿只展示 3 位裁决编号，真实 id 统一在展示层截取。
 export const getDecisionCode = (id: string): string => id.slice(-3).toUpperCase();

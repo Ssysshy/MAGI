@@ -13,6 +13,7 @@ import { decisionRoutes } from './modules/decision/decision.routes.js';
 export const buildApp = async (): Promise<FastifyInstance> => {
   const app = Fastify({ logger: true });
 
+  // 注册顺序保持为：跨域/基础中间件 -> 数据库 -> 鉴权 -> 业务路由。
   await app.register(cors, {
     origin: env.FRONTEND_ORIGIN,
     credentials: true,
@@ -29,6 +30,7 @@ export const buildApp = async (): Promise<FastifyInstance> => {
   await app.register(aiProviderRoutes);
   await app.register(decisionRoutes);
 
+  // health 不依赖登录，供容器和本地联调用。
   app.get('/health', async (): Promise<{ ok: true }> => ({ ok: true }));
 
   return app;

@@ -17,6 +17,7 @@ const LoginPage = (): JSX.Element => {
 
   const handleLogin = async (): Promise<void> => {
     try {
+      // 登录成功后由 Cookie 维护会话，直接进入主控台。
       await login({ email, password });
       void Taro.redirectTo({ url: '/pages/console/index' });
     } catch {

@@ -20,6 +20,7 @@ export interface UsableAiProviderConfig {
 
 export const createAiProviderService = (prisma: PrismaClient) => ({
   async save(userId: string, input: SaveAiProviderConfigInput): Promise<MaskedAiProviderConfig> {
+    // 每个用户只允许一份个人 AI 配置；重复保存走 upsert 覆盖当前配置。
     const config = await prisma.aiProviderConfig.upsert({
       where: { userId },
       create: {
@@ -56,6 +57,7 @@ export const createAiProviderService = (prisma: PrismaClient) => ({
       return null;
     }
 
+    // API Key 永远不回传明文，只告诉前端配置是否存在。
     return {
       id: config.id,
       provider: config.provider,
@@ -72,6 +74,7 @@ export const createAiProviderService = (prisma: PrismaClient) => ({
       include: { aiProviderConfig: true },
     });
 
+    // 只有授权用户且显式启用个人配置时，裁决流程才会解密并使用个人 API。
     if (user?.canConfigureAiProvider && user.aiProviderConfig?.enabled) {
       return {
         provider: user.aiProviderConfig.provider,
@@ -81,6 +84,7 @@ export const createAiProviderService = (prisma: PrismaClient) => ({
       };
     }
 
+    // 返回 null 代表调用方应回退到系统 AI API。
     return null;
   },
 });
