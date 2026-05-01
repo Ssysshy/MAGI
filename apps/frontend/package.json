@@ -22,11 +22,14 @@
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@babel/plugin-proposal-decorators": "^7.29.0",
     "@tarojs/cli": "^4.0.9",
+    "@tarojs/vite-runner": "4.2.0",
     "@types/react": "^18.3.20",
     "@types/react-dom": "^18.3.6",
+    "@vitejs/plugin-react": "^4.7.0",
     "less": "^4.3.0",
     "typescript": "^5.8.3",
-    "vite": "^6.2.6"
+    "vite": "^4.5.14"
   }
 }

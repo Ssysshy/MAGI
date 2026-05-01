@@ -43,3 +43,9 @@ Magi 决策控制台是一个面向自然语言问题的 AI 裁决系统。
 前端负责页面渲染、状态展示、裁决触发、历史回看和 AI 配置入口。
 
 后端负责认证、权限、AI API 配置加密保存、LLM 裁决编排、限流、超时降级和数据持久化。
+
+前端启动：
+pnpm --filter @magi/frontend exec taro build --type h5 --watch --port 3000
+
+后端启动：
+pnpm --filter @magi/backend exec node --import tsx src/server.ts
