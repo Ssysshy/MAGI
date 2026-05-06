@@ -2,6 +2,7 @@ import { Text, View } from '@tarojs/components';
 import type { BrainAnalysis } from '@magi/shared';
 import { BRAIN_ANALYSIS_META } from '../pages/console/console.constants';
 import { getBrainStanceText } from './MagiBrainGraph';
+import './BrainAnalysisPanel.less';
 
 export interface BrainAnalysisPanelProps {
   analysis: BrainAnalysis;

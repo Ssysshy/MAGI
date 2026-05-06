@@ -1,6 +1,7 @@
 import { Text, View } from '@tarojs/components';
 import type { DecisionSession, FinalStatus } from '@magi/shared';
 import { FINAL_STATUS_TEXT, QUESTION_TYPE_TEXT } from '../pages/console/console.constants';
+import './DecisionSummaryPanel.less';
 
 export interface DecisionSummaryPanelProps {
   decision: DecisionSession;

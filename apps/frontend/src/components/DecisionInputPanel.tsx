@@ -1,4 +1,5 @@
 import { Button, Text, Textarea, View } from '@tarojs/components';
+import './DecisionInputPanel.less';
 
 export interface DecisionInputPanelProps {
   question: string;

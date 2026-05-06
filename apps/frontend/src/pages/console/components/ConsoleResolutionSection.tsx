@@ -2,6 +2,7 @@ import { Text, View } from '@tarojs/components';
 import type { BrainAnalysis, DecisionSession } from '@magi/shared';
 import { BrainAnalysisPanel } from '../../../components/BrainAnalysisPanel';
 import { DecisionSummaryPanel } from '../../../components/DecisionSummaryPanel';
+import './ConsoleResolutionSection.less';
 
 export interface ConsoleResolutionSectionProps {
   decision: DecisionSession;
