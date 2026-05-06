@@ -10,6 +10,88 @@ export interface LlmMessage {
   content: string;
 }
 
+const THINK_BLOCK_RE = /<think>[\s\S]*?<\/think>/gi;
+const JSON_FENCE_RE = /```json\s*([\s\S]*?)\s*```/i;
+
+const extractFirstJsonObject = (value: string): string | null => {
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+
+      if (char === '\\') {
+        escaped = true;
+        continue;
+      }
+
+      if (char === '"') {
+        inString = false;
+      }
+
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (char === '{') {
+      if (depth === 0) {
+        start = index;
+      }
+
+      depth += 1;
+      continue;
+    }
+
+    if (char === '}') {
+      if (depth === 0) {
+        continue;
+      }
+
+      depth -= 1;
+
+      if (depth === 0 && start >= 0) {
+        return value.slice(start, index + 1);
+      }
+    }
+  }
+
+  return null;
+};
+
+const parseModelJson = <T>(rawContent: string): T => {
+  const withoutThink = rawContent.replace(THINK_BLOCK_RE, '').trim();
+
+  try {
+    return JSON.parse(withoutThink) as T;
+  } catch {
+    const fenced = withoutThink.match(JSON_FENCE_RE)?.[1]?.trim();
+
+    if (fenced) {
+      return JSON.parse(fenced) as T;
+    }
+
+    const inlineJson = extractFirstJsonObject(withoutThink);
+
+    if (inlineJson) {
+      return JSON.parse(inlineJson) as T;
+    }
+
+    throw new Error('LLM_JSON_PARSE_FAILED');
+  }
+};
+
 export const requestLlmJson = async <T>(
   config: LlmConfig,
   messages: LlmMessage[],
@@ -48,7 +130,7 @@ export const requestLlmJson = async <T>(
       throw new Error('LLM_EMPTY_CONTENT');
     }
 
-    return JSON.parse(content) as T;
+    return parseModelJson<T>(content);
   } finally {
     clearTimeout(timer);
   }

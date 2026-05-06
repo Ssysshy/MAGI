@@ -2,6 +2,7 @@ import { useCallback, useMemo, useState } from 'react';
 import Taro, { useLoad } from '@tarojs/taro';
 import type { BrainAnalysis, DecisionSession } from '@magi/shared';
 import { createDecisionSession, getDecisionSession } from '../../../api/decision';
+import { getHttpStatusCode } from '../../../api/http';
 import { BRAIN_ORDER, DEFAULT_DECISION } from '../console.constants';
 import type { ConsoleStatus, UseConsoleDecisionResult } from '../console.types';
 
@@ -41,15 +42,27 @@ export const useConsoleDecision = (): UseConsoleDecisionResult => {
     setLoading(true);
     setStatus('QUESTION ACCEPTED');
     // 先给用户看到接收态，再进入分析态，贴近主控台执行流程。
-    window.setTimeout((): void => setStatus('ANALYZING'), 260);
+    const analyzingTimer = window.setTimeout((): void => setStatus('ANALYZING'), 260);
 
     try {
       const session = await createDecisionSession(trimmedQuestion);
+      window.clearTimeout(analyzingTimer);
       setDecision(session);
       setStatus('RESOLUTION READY');
-    } catch {
-      // 当前接口失败大概率是未登录或会话失效，直接引导到登录页。
-      void Taro.navigateTo({ url: '/pages/login/index' });
+    } catch (error) {
+      window.clearTimeout(analyzingTimer);
+      const statusCode = getHttpStatusCode(error);
+
+      if (statusCode === 401 || statusCode === 403) {
+        void Taro.navigateTo({ url: '/pages/login/index' });
+        return;
+      }
+
+      setStatus('RESOLUTION READY');
+      void Taro.showToast({
+        title: '裁决服务暂不可用',
+        icon: 'none',
+      });
     } finally {
       setLoading(false);
     }

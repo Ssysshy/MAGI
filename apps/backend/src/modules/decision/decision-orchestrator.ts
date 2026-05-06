@@ -49,6 +49,186 @@ export interface OrchestrateDecisionInput {
 }
 
 type DecisionDraft = Omit<DecisionSession, 'id' | 'createdAt'>;
+type BrainType = 'melchior' | 'balthasar' | 'casper';
+type AppError = Error & { statusCode: number };
+
+const BRAIN_TYPES: BrainType[] = ['melchior', 'balthasar', 'casper'];
+
+const toText = (value: unknown): string => {
+  if (typeof value === 'string') {
+    return value.trim();
+  }
+
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+
+  return '';
+};
+
+const toQuestionType = (value: unknown): DecisionDraft['questionType'] => {
+  const raw = toText(value);
+
+  if (raw === 'boolean' || raw === 'multiple_choice' || raw === 'priority' || raw === 'strategy' || raw === 'diagnosis') {
+    return raw;
+  }
+
+  return 'strategy';
+};
+
+const toConfidence = (value: unknown): number => {
+  if (typeof value !== 'number' || Number.isNaN(value)) {
+    return 0;
+  }
+
+  if (value < 0) {
+    return 0;
+  }
+
+  if (value > 1) {
+    return 1;
+  }
+
+  return value;
+};
+
+const toVariables = (value: unknown): DecisionDraft['variables'] => {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((item): DecisionDraft['variables'][number] | null => {
+      if (typeof item === 'string') {
+        const name = item.trim();
+        if (!name) {
+          return null;
+        }
+
+        return {
+          name,
+          value: '',
+          isMissing: true,
+          isCritical: false,
+        };
+      }
+
+      if (!item || typeof item !== 'object') {
+        return null;
+      }
+
+      const row = item as Record<string, unknown>;
+      const name = toText(row.name);
+
+      if (!name) {
+        return null;
+      }
+
+      return {
+        name,
+        value: toText(row.value),
+        isMissing: typeof row.isMissing === 'boolean' ? row.isMissing : false,
+        isCritical: typeof row.isCritical === 'boolean' ? row.isCritical : false,
+      };
+    })
+    .filter((item): item is DecisionDraft['variables'][number] => item !== null);
+};
+
+const toBrainAnalysis = (
+  brainType: BrainType,
+  value: unknown,
+): DecisionDraft['analyses'][number] => {
+  const row = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>;
+  const reason = toText(row.reason) || toText(row.analysis) || toText(value) || '信息不足';
+  const stanceRaw = toText(row.stance);
+  const stance = stanceRaw === 'approve' || stanceRaw === 'reject' || stanceRaw === 'defer' || stanceRaw === 'uncertain'
+    ? stanceRaw
+    : 'uncertain';
+  const focusPoints = Array.isArray(row.focusPoints) ? row.focusPoints.map(toText).filter(Boolean) : [];
+  const uncertainties = Array.isArray(row.uncertainties) ? row.uncertainties.map(toText).filter(Boolean) : [];
+
+  return {
+    brainType,
+    stance,
+    reason,
+    focusPoints: focusPoints.length > 0 ? focusPoints : ['信息不足'],
+    uncertainties: uncertainties.length > 0 ? uncertainties : [reason],
+    unavailable: typeof row.unavailable === 'boolean' ? row.unavailable : false,
+  };
+};
+
+const toAnalyses = (value: unknown): DecisionDraft['analyses'] => {
+  const rows = (Array.isArray(value) ? value : []) as Array<Record<string, unknown>>;
+  const mapByBrain = new Map<BrainType, Record<string, unknown>>();
+
+  rows.forEach((item) => {
+    const brainType = toText(item.brainType) as BrainType;
+
+    if (brainType === 'melchior' || brainType === 'balthasar' || brainType === 'casper') {
+      mapByBrain.set(brainType, item);
+    }
+  });
+
+  if (!Array.isArray(value) && value && typeof value === 'object') {
+    const objectValue = value as Record<string, unknown>;
+    BRAIN_TYPES.forEach((brainType) => {
+      if (objectValue[brainType] && !mapByBrain.has(brainType)) {
+        mapByBrain.set(brainType, objectValue[brainType] as Record<string, unknown>);
+      }
+    });
+  }
+
+  return BRAIN_TYPES.map((brainType) => toBrainAnalysis(brainType, mapByBrain.get(brainType)));
+};
+
+const toDecisionSummary = (value: unknown, summary: string): DecisionDraft['decisionSummary'] => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    const text = toText(value) || summary || '信息不足';
+    return {
+      rule: text,
+      majorityOpinion: text,
+      minorityOpinion: '无',
+      missingInformation: [],
+      finalDecision: text,
+    };
+  }
+
+  const row = value as Record<string, unknown>;
+  const rule = toText(row.rule) || summary || '信息不足';
+  const majorityOpinion = toText(row.majorityOpinion) || toText(row.finalDecision) || summary || '信息不足';
+  const minorityOpinion = toText(row.minorityOpinion) || '无';
+  const missingInformation = Array.isArray(row.missingInformation) ? row.missingInformation.map(toText).filter(Boolean) : [];
+  const finalDecision = toText(row.finalDecision) || summary || majorityOpinion;
+
+  return {
+    rule,
+    majorityOpinion,
+    minorityOpinion,
+    missingInformation,
+    finalDecision,
+  };
+};
+
+const normalizeDecisionDraft = (
+  raw: unknown,
+  userId: string,
+  question: string,
+): DecisionDraft => {
+  const row = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const summary = toText(row.summary) || toText(row.decisionSummary) || '信息不足';
+
+  return {
+    userId,
+    question,
+    questionType: toQuestionType(row.questionType),
+    finalStatus: normalizeStatus(toText(row.finalStatus)),
+    summary,
+    confidence: toConfidence(row.confidence),
+    variables: toVariables(row.variables),
+    analyses: toAnalyses(row.analyses),
+    decisionSummary: toDecisionSummary(row.decisionSummary, summary),
+  };
+};
 
 export const createRefusedDecision = (
   userId: string,
@@ -114,6 +294,32 @@ const normalizeStatus = (status: string): FinalStatus => {
   return 'refused';
 };
 
+const createDecisionUnavailableError = (cause?: unknown): AppError => {
+  const error = new Error('DECISION_SERVICE_UNAVAILABLE', cause === undefined ? undefined : { cause }) as AppError;
+  error.statusCode = 503;
+
+  return error;
+};
+
+const isLlmServiceError = (error: unknown): boolean => {
+  if (error instanceof z.ZodError) {
+    return true;
+  }
+
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  if (error.name === 'AbortError') {
+    return true;
+  }
+
+  return (
+    error.message.startsWith('LLM_')
+    || error.message === 'DECISION_SERVICE_UNAVAILABLE'
+  );
+};
+
 export const orchestrateDecision = async (
   input: OrchestrateDecisionInput,
 ): Promise<DecisionDraft> => decisionLimit(async (): Promise<DecisionDraft> => {
@@ -142,14 +348,12 @@ export const orchestrateDecision = async (
     ));
 
     // 服务端重新覆盖 userId/question，防止模型回写不可信字段污染持久化数据。
-    return decisionDraftSchema.parse({
-      ...draft,
-      userId: input.userId,
-      question: input.question,
-      finalStatus: normalizeStatus(draft.finalStatus),
-    });
-  } catch {
-    // 对用户保持稳定响应形态，不把 provider 错误、超时、JSON 错误直接抛到前端。
-    return createRefusedDecision(input.userId, input.question, 'LLM 调用失败，系统拒绝裁决。');
+    return decisionDraftSchema.parse(normalizeDecisionDraft(draft, input.userId, input.question));
+  } catch (error) {
+    if (isLlmServiceError(error)) {
+      throw createDecisionUnavailableError(error);
+    }
+
+    throw error;
   }
 });

@@ -18,7 +18,7 @@ export default defineConfig<'vite'>(async (): Promise<UserConfigExport<'vite'>> 
     publicPath: '/',
     staticDirectory: 'static',
     router: {
-      mode: 'browser',
+      mode: 'hash',
     },
   },
 }));
