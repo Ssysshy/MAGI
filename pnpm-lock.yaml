@@ -106,6 +106,9 @@ importers:
       '@tarojs/cli':
         specifier: ^4.0.9
         version: 4.2.0(@types/node@22.19.17)
+      '@tarojs/plugin-platform-weapp':
+        specifier: ^4.2.0
+        version: 4.2.0(@tarojs/service@4.2.0)(@tarojs/shared@4.2.0)
       '@tarojs/vite-runner':
         specifier: 4.2.0
         version: 4.2.0(@tarojs/runtime@4.2.0)(@types/babel__core@7.20.5)(jiti@2.6.1)(postcss@8.5.12)(rollup@3.30.0)(terser@5.46.2)(tsx@4.21.0)(typescript@5.9.3)(vite@4.5.14(@types/node@22.19.17)(less@4.6.4)(sass@1.99.0)(terser@5.46.2))
@@ -1776,6 +1779,13 @@ packages:
 
   '@tarojs/plugin-platform-h5@4.2.0':
     resolution: {integrity: sha512-HoyGHYaBrxJtaIRT1Y81LK7re0pLfF9DOGQ77bNmQwtuJS9JpiFMI47Q27+2anldwJodQdQP9d3KSPRqGnRLCw==}
+
+  '@tarojs/plugin-platform-weapp@4.2.0':
+    resolution: {integrity: sha512-0meY33+KYITF9uUav4JdKn2PY1xRnVQBVurPv3wm891pRBqPbfipcUsRjF7B1CeeWYqQK9/jy7gQlnzApmbakA==}
+    engines: {node: '>= 18'}
+    peerDependencies:
+      '@tarojs/service': 4.2.0
+      '@tarojs/shared': 4.2.0
 
   '@tarojs/react@4.2.0':
     resolution: {integrity: sha512-DdRzqNxECKONC+WL27RYX9xlLDiltT+B+BU1lutjnJLdI6epX93Jq5j+Tizeze2kXo+xl0HRzqamtnw64Xdlbw==}
@@ -6054,6 +6064,11 @@ snapshots:
       - webpack
       - webpack-chain
       - webpack-dev-server
+
+  '@tarojs/plugin-platform-weapp@4.2.0(@tarojs/service@4.2.0)(@tarojs/shared@4.2.0)':
+    dependencies:
+      '@tarojs/service': 4.2.0
+      '@tarojs/shared': 4.2.0
 
   '@tarojs/react@4.2.0(react@18.3.1)':
     dependencies:

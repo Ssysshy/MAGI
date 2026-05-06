@@ -13,7 +13,7 @@ export default defineConfig<'vite'>(async (): Promise<UserConfigExport<'vite'>> 
   outputRoot: 'dist',
   framework: 'react',
   compiler: 'vite',
-  plugins: ['@tarojs/plugin-platform-h5'],
+  plugins: ['@tarojs/plugin-platform-h5', '@tarojs/plugin-platform-weapp'],
   h5: {
     publicPath: '/',
     staticDirectory: 'static',
