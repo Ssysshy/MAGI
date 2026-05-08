@@ -1,5 +1,6 @@
 import { Text, View } from '@tarojs/components';
 import type { ConsoleStatus } from '../console.types';
+import './ConsoleStatusBar.less';
 
 export interface ConsoleStatusBarProps {
   status: ConsoleStatus;

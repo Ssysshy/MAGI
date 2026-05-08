@@ -15,14 +15,16 @@ export const buildApp = async (): Promise<FastifyInstance> => {
   const app = Fastify({ logger: true });
 
   app.setErrorHandler((error, _request, reply): void => {
-    if (error instanceof ZodError) {
+    const appError = error as Error & { statusCode?: number };
+
+    if (appError instanceof ZodError) {
       reply.status(400).send({ error: 'VALIDATION_ERROR' });
       return;
     }
 
-    const statusCode = error.statusCode ?? 500;
+    const statusCode = appError.statusCode ?? 500;
     reply.status(statusCode).send({
-      error: statusCode >= 500 ? 'INTERNAL_SERVER_ERROR' : error.message,
+      error: statusCode >= 500 ? 'INTERNAL_SERVER_ERROR' : appError.message,
     });
   });
 

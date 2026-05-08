@@ -1,0 +1,33 @@
+.topbar {
+  height: 82px;
+  padding: 0 30px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #d87932;
+}
+
+.topbar-spacer {
+  width: 120px;
+}
+
+.brand {
+  font-size: 36px;
+  font-weight: 900;
+  letter-spacing: 0;
+}
+
+@media (max-width: 560px) {
+  .topbar {
+    padding: 0 18px;
+  }
+
+  .brand {
+    font-size: 30px;
+  }
+
+  .topbar-actions,
+  .topbar-spacer {
+    width: 48px;
+  }
+}

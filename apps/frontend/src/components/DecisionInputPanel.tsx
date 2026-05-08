@@ -1,7 +1,9 @@
 import { Button, Text, Textarea, View } from '@tarojs/components';
+import './DecisionInputPanel.less';
 
 export interface DecisionInputPanelProps {
   question: string;
+  placeholder?: string;
   questionTypeLabel: string;
   loading: boolean;
   onQuestionChange: (value: string) => void;
@@ -16,6 +18,7 @@ interface TextareaValueEvent {
 
 export const DecisionInputPanel = ({
   question,
+  placeholder,
   questionTypeLabel,
   loading,
   onQuestionChange,
@@ -25,6 +28,7 @@ export const DecisionInputPanel = ({
     <Textarea
       className="question-textarea"
       value={question}
+      placeholder={placeholder}
       maxlength={2000}
       disabled={loading}
       onInput={(event: TextareaValueEvent): void => onQuestionChange(event.detail.value)}

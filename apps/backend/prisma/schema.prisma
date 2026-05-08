@@ -37,6 +37,8 @@ model DecisionSession {
   userId        String
   question      String   @db.Text
   questionType  String
+  processingStage  String
+  processingStatus String
   finalStatus   String
   summary       String   @db.Text
   confidence    Float

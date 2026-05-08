@@ -1,7 +1,8 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Taro, { useLoad } from '@tarojs/taro';
 import type { BrainAnalysis, DecisionSession } from '@magi/shared';
 import { createDecisionSession, getDecisionSession } from '../../../api/decision';
+import { getHttpStatusCode } from '../../../api/http';
 import { BRAIN_ORDER, DEFAULT_DECISION } from '../console.constants';
 import type { ConsoleStatus, UseConsoleDecisionResult } from '../console.types';
 
@@ -9,14 +10,83 @@ const sortAnalyses = (analyses: BrainAnalysis[]): BrainAnalysis[] => [...analyse
   (left: BrainAnalysis, right: BrainAnalysis): number => BRAIN_ORDER[left.brainType] - BRAIN_ORDER[right.brainType],
 );
 
+const getConsoleStatus = (decision: DecisionSession): ConsoleStatus => {
+  if (!decision.question.trim() && decision.processingStatus === 'pending') {
+    return 'RESOLUTION READY';
+  }
+
+  if (decision.processingStage === 'queued') {
+    return 'QUESTION ACCEPTED';
+  }
+
+  if (
+    decision.processingStage === 'melchior'
+    || decision.processingStage === 'balthasar'
+    || decision.processingStage === 'casper'
+    || decision.processingStage === 'core'
+  ) {
+    return 'ANALYZING';
+  }
+
+  return 'RESOLUTION READY';
+};
+
 export const useConsoleDecision = (): UseConsoleDecisionResult => {
-  const [status, setStatus] = useState<ConsoleStatus>('RESOLUTION READY');
   const [question, setQuestion] = useState<string>(DEFAULT_DECISION.question);
   const [decision, setDecision] = useState<DecisionSession>(DEFAULT_DECISION);
   const [loading, setLoading] = useState<boolean>(false);
+  const pollingTimerRef = useRef<number | null>(null);
+  const pollingRef = useRef<boolean>(false);
+
+  const stopPolling = useCallback((): void => {
+    pollingRef.current = false;
+
+    if (pollingTimerRef.current !== null) {
+      window.clearTimeout(pollingTimerRef.current);
+      pollingTimerRef.current = null;
+    }
+  }, []);
+
+  const startPolling = useCallback((sessionId: string): void => {
+    stopPolling();
+    pollingRef.current = true;
+
+    const poll = async (): Promise<void> => {
+      if (!pollingRef.current) {
+        return;
+      }
+
+      try {
+        const session = await getDecisionSession(sessionId);
+
+        if (!pollingRef.current) {
+          return;
+        }
+
+        setDecision(session);
+
+        if (session.processingStatus === 'completed' || session.processingStatus === 'failed') {
+          stopPolling();
+          setLoading(false);
+          return;
+        }
+      } catch {
+        stopPolling();
+        setLoading(false);
+        return;
+      }
+
+      pollingTimerRef.current = window.setTimeout((): void => {
+        void poll();
+      }, 2000);
+    };
+
+    void poll();
+  }, [stopPolling]);
+
+  useEffect((): (() => void) => () => stopPolling(), [stopPolling]);
 
   useLoad((query: Record<string, string | undefined>): void => {
-    // 历史记录页带 id 回到主控台时，用服务端快照覆盖默认裁决。
     if (!query.id) {
       return;
     }
@@ -25,7 +95,15 @@ export const useConsoleDecision = (): UseConsoleDecisionResult => {
       .then((session: DecisionSession): void => {
         setDecision(session);
         setQuestion(session.question);
-        setStatus('RESOLUTION READY');
+
+        if (session.processingStatus === 'completed' || session.processingStatus === 'failed') {
+          setLoading(false);
+          stopPolling();
+          return;
+        }
+
+        setLoading(true);
+        startPolling(session.id);
       })
       .catch((): void => undefined);
   });
@@ -33,33 +111,43 @@ export const useConsoleDecision = (): UseConsoleDecisionResult => {
   const submitDecision = useCallback(async (): Promise<void> => {
     const trimmedQuestion = question.trim();
 
-    // 空问题和重复点击都不触发请求，保持一次问题一次裁决。
     if (trimmedQuestion.length < 2 || loading) {
       return;
     }
 
     setLoading(true);
-    setStatus('QUESTION ACCEPTED');
-    // 先给用户看到接收态，再进入分析态，贴近主控台执行流程。
-    window.setTimeout((): void => setStatus('ANALYZING'), 260);
+    stopPolling();
 
     try {
       const session = await createDecisionSession(trimmedQuestion);
       setDecision(session);
-      setStatus('RESOLUTION READY');
-    } catch {
-      // 当前接口失败大概率是未登录或会话失效，直接引导到登录页。
-      void Taro.navigateTo({ url: '/pages/login/index' });
-    } finally {
-      setLoading(false);
-    }
-  }, [loading, question]);
 
-  // 三脑详情固定按 Melchior、Balthasar、Casper 展示，避免接口返回顺序影响阅读。
+      if (session.processingStatus === 'completed' || session.processingStatus === 'failed') {
+        setLoading(false);
+        return;
+      }
+
+      startPolling(session.id);
+    } catch (error) {
+      const statusCode = getHttpStatusCode(error);
+
+      if (statusCode === 401 || statusCode === 403) {
+        void Taro.navigateTo({ url: '/pages/login/index' });
+        return;
+      }
+
+      setLoading(false);
+      void Taro.showToast({
+        title: '裁决服务暂不可用',
+        icon: 'none',
+      });
+    }
+  }, [loading, question, startPolling, stopPolling]);
+
   const analyses = useMemo((): BrainAnalysis[] => sortAnalyses(decision.analyses), [decision.analyses]);
 
   return {
-    status,
+    status: getConsoleStatus(decision),
     question,
     decision,
     loading,

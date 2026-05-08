@@ -16,5 +16,4 @@ export interface UseConsoleDecisionResult {
 export interface BrainAnalysisMeta {
   title: string;
   role: string;
-  className: string;
 }

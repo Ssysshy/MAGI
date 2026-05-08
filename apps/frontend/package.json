@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "taro dev --type h5 --host 0.0.0.0",
+    "dev": "taro build --type h5 --watch",
     "build": "taro build --type h5",
     "lint": "tsc -p tsconfig.json --noEmit",
     "typecheck": "tsc -p tsconfig.json --noEmit"
@@ -24,6 +24,7 @@
   "devDependencies": {
     "@babel/plugin-proposal-decorators": "^7.29.0",
     "@tarojs/cli": "^4.0.9",
+    "@tarojs/plugin-platform-weapp": "^4.2.0",
     "@tarojs/vite-runner": "4.2.0",
     "@types/react": "^18.3.20",
     "@types/react-dom": "^18.3.6",

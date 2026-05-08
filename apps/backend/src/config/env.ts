@@ -8,6 +8,8 @@ const envSchema = z.object({
   SYSTEM_AI_BASE_URL: z.string().url(),
   SYSTEM_AI_MODEL: z.string().min(1),
   SYSTEM_AI_API_KEY: z.string().min(1),
+  DECISION_LLM_TIMEOUT_MS: z.coerce.number().int().positive().default(35000),
+  MELCHIOR_TIMEOUT_MS: z.coerce.number().int().positive().optional(),
   FRONTEND_ORIGIN: z.string().url().default('http://localhost:3000'),
   PORT: z.coerce.number().default(3001),
 });

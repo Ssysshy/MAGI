@@ -10,6 +10,35 @@
 
 ---
 
+## 2026-05-08 当前实现同步
+
+以下为当前代码已落地行为，优先级高于后文历史任务拆解描述：
+
+1. 裁决创建为异步链路
+- `POST /api/decision-sessions` 会先创建 `queued/running` 会话并返回，不等待三脑与 Core 完成。
+- 后端后台推进 `melchior -> balthasar -> casper -> core`，最终落到 `completed` 或 `failed`。
+
+2. 会话模型已扩展处理态字段
+- `DecisionSession` 现包含 `processingStage` 与 `processingStatus`。
+- `BrainAnalysis` 现包含 `status`，用于显示 `pending/running/completed/failed`。
+
+3. LLM 超时与重试策略以环境变量为准
+- `DECISION_LLM_TIMEOUT_MS` 默认 `35000ms`。
+- `MELCHIOR_TIMEOUT_MS` 可独立配置。
+- 请求层会做有限重试与 jitter，超时通过 `AbortController` 终止。
+
+4. Melchior/Core 已上线字段级兼容归一化
+- 对“可解析 JSON 但字段不标准”的返回执行字段级降级，而非直接整链失败。
+- `Melchior` 支持 `questionType` 别名归一化、字符串/非标准对象 `analysis` 兼容。
+- `Core` 支持 `decisionSummary` 非标准对象与缺字段自动补齐。
+
+5. 可观测性已补齐关键日志
+- `decision.llm.attempt` 日志包含 `responseFormatType/contentPreview/contentLength`。
+- `decision.brain.partial` 与 `decision.core.partial` 记录字段级降级原因。
+- `decision.pipeline.failed` 记录链路失败阶段与错误信息。
+
+说明：后续若继续使用本文档执行开发，请以“当前实现同步”小节为基线，后文任务清单视为历史计划，不再逐条代表现状。
+
 ## 文件结构
 
 ```txt
