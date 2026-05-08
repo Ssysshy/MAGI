@@ -2,7 +2,6 @@ import { useState } from 'react';
 import Taro, { useLoad } from '@tarojs/taro';
 import { View } from '@tarojs/components';
 import { AiConfigFloatButton } from '../../components/AiConfigFloatButton';
-import { DecisionInputPanel } from '../../components/DecisionInputPanel';
 import { MagiBrainGraph } from '../../components/MagiBrainGraph';
 import { getCurrentUser } from '../../api/auth';
 import { getHttpStatusCode } from '../../api/http';
@@ -40,18 +39,11 @@ const ConsoleContent = (): JSX.Element => {
         finalStatus={finalStatus}
         analyses={analyses}
         decisionCode={decisionCode}
+        question={question}
+        loading={loading}
+        onQuestionChange={setQuestion}
+        onSubmit={submitDecision}
       />
-
-      <View className="input-wrap">
-        <DecisionInputPanel
-          question={question}
-          placeholder="请输入需要裁决的问题"
-          questionTypeLabel="日常决策"
-          loading={loading}
-          onQuestionChange={setQuestion}
-          onSubmit={submitDecision}
-        />
-      </View>
 
       <ConsoleResolutionSection decision={decision} analyses={analyses} />
       <AiConfigFloatButton visible={canConfigureAi} />

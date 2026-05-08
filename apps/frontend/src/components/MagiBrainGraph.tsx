@@ -1,5 +1,6 @@
 import { View, Text } from '@tarojs/components';
 import type { BrainAnalysis, FinalStatus } from '@magi/shared';
+import { DecisionInputPanel } from './DecisionInputPanel';
 import type { ConsoleStatus } from '../pages/console/console.types';
 import { BRAIN_STANCE_TEXT, GRAPH_FINAL_STATUS_TEXT } from '../pages/console/console.constants';
 import './MagiBrainGraph.less';
@@ -9,6 +10,10 @@ export interface MagiBrainGraphProps {
   finalStatus: FinalStatus;
   analyses: BrainAnalysis[];
   decisionCode: string;
+  question: string;
+  loading: boolean;
+  onQuestionChange: (value: string) => void;
+  onSubmit: () => void;
 }
 
 const getBrainVisualState = (analysis: BrainAnalysis, finalStatus: FinalStatus): string => {
@@ -79,7 +84,16 @@ const getResolveBoxClassName = (analyses: BrainAnalysis[], finalStatus: FinalSta
   return `approve-box-${finalStatus}`;
 };
 
-export const MagiBrainGraph = ({ status, finalStatus, analyses, decisionCode }: MagiBrainGraphProps): JSX.Element => (
+export const MagiBrainGraph = ({
+  status,
+  finalStatus,
+  analyses,
+  decisionCode,
+  question,
+  loading,
+  onQuestionChange,
+  onSubmit,
+}: MagiBrainGraphProps): JSX.Element => (
   <View className="brain-graph">
     <View className="console-frame">
       <View className="frame-header">
@@ -114,7 +128,7 @@ export const MagiBrainGraph = ({ status, finalStatus, analyses, decisionCode }: 
           </View>
         ))}
         <View className="magi-core">
-          <Text>MAGI</Text>
+          <Text className="core-title">MAGI</Text>
           <Text className="core-state">{getCoreStateText(status, finalStatus, analyses)}</Text>
         </View>
       </View>
@@ -123,6 +137,16 @@ export const MagiBrainGraph = ({ status, finalStatus, analyses, decisionCode }: 
       <View className="question-caption">
         <Text>QUESTION</Text>
         <Text>日常决策 / 少数服从多数</Text>
+      </View>
+      <View className="input-wrap">
+        <DecisionInputPanel
+          question={question}
+          placeholder="请输入需要裁决的问题"
+          questionTypeLabel="日常决策"
+          loading={loading}
+          onQuestionChange={onQuestionChange}
+          onSubmit={onSubmit}
+        />
       </View>
     </View>
   </View>

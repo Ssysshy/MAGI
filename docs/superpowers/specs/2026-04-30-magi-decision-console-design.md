@@ -160,6 +160,12 @@
 4. `主控汇总`
 主控综合三脑结果后输出最终裁决
 
+当前实现补充：
+
+- `POST /api/decision-sessions` 先创建 `queued/running` 的会话快照并立即返回，后端异步推进 `melchior -> balthasar -> casper -> core -> completed/failed`。
+- 三脑执行并非并行 fan-out，而是按阶段顺序推进；每一阶段会把对应脑状态更新为 `running`。
+- `Melchior` 与 `Core` 已采用字段级归一化，允许“可解析 JSON 但字段不标准”时继续裁决；仅在关键信号不可用时失败。
+
 ### 5.3 裁决规则
 
 - `关键变量缺失` 拥有最高优先级
@@ -185,6 +191,11 @@
 
 - 先判断信息是否足够，再进入裁决
 - 先展示主控结论，再允许下钻查看三脑理由
+
+当前实现补充：
+
+- 前端应轮询同一 `sessionId` 的详情，直到 `processingStage` 进入 `completed` 或 `failed`。
+- 历史记录可能包含处理中会话，状态由 `processingStage + processingStatus` 驱动，不再只看最终裁决态。
 
 ## 7. 第一版功能范围
 
@@ -388,22 +399,27 @@ p-limit: 单实例裁决并发 5
 
 ### 10.3 超时控制
 
-第一版超时规则：
+当前实现超时规则：
 
-- 完整裁决任务：`60s`
-- 单次 LLM 请求：`25s`
-- 数据库写入：`5s`
-- 前端请求等待：`70s`
+- `DECISION_LLM_TIMEOUT_MS` 默认 `35000ms`
+- `MELCHIOR_TIMEOUT_MS` 可单独配置，不配置时继承 `DECISION_LLM_TIMEOUT_MS`
+- 后端使用 `AbortController` 终止单次 LLM 请求
 
-后端使用 `AbortController` 终止超时请求。
+说明：当前代码未实现“完整裁决任务 60s / 数据库写入 5s / 前端等待 70s”的统一硬超时。
 
 ### 10.4 降级规则
 
-- LLM 超时：返回 `拒绝裁决`
-- 单个大脑失败：标记该大脑不可用，由 `Magi Core` 基于剩余结果输出低置信度裁决
-- 三个大脑全部失败：返回 `拒绝裁决`
-- LLM 返回格式错误：重试 1 次，仍失败则返回 `拒绝裁决`
-- Provider 限流：返回 `429`
+- LLM `401/403/429/5xx`、超时、空内容、JSON 解析失败会被判定为服务异常
+- 单个大脑异常会写入该脑 `status: failed`，链路继续推进到 `Core`
+- `Melchior`：严格题型需有可用分析信号；明显风险题允许规则直判降级继续
+- `Core`：支持 `decisionSummary` 字段级兜底（非标准对象/缺字段时按 `summary` 自动补齐）
+- 链路任一步骤抛错会落入 `processingStage: failed`，并写入占位 summary
+
+实现细节：
+
+- `requestLlmJson` 支持解析 fenced JSON/内嵌 JSON，并带轻量修复（尾逗号、中文标点）
+- 每次请求记录 `responseFormatType/contentPreview/contentLength`
+- 字段级降级日志使用 `LLM_SCHEMA_PARTIAL_INVALID`
 
 第一版使用同步接口，不引入队列。若后续裁决任务经常超过 `60s`，再引入 `Redis + BullMQ`。
 
@@ -449,9 +465,14 @@ p-limit: 单实例裁决并发 5
 - `userId`
 - `question`
 - `questionType`
+- `processingStage`
+- `processingStatus`
 - `finalStatus`
 - `summary`
 - `confidence`
+- `variablesJson`
+- `analysesJson`
+- `summaryJson`
 - `createdAt`
 
 ### 11.4 DecisionVariable
@@ -472,10 +493,12 @@ p-limit: 单实例裁决并发 5
 字段：
 
 - `brainType`
+- `status`
 - `stance`
 - `reason`
 - `focusPoints`
 - `uncertainties`
+- `unavailable`
 
 ### 11.6 DecisionSummary
 
