@@ -45,6 +45,7 @@ const ConsoleContent = (): JSX.Element => {
       <View className="input-wrap">
         <DecisionInputPanel
           question={question}
+          placeholder="请输入需要裁决的问题"
           questionTypeLabel="日常决策"
           loading={loading}
           onQuestionChange={setQuestion}

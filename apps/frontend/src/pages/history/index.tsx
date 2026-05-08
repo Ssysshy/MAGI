@@ -12,6 +12,14 @@ const statusText: Record<string, string> = {
   refused: '拒绝裁决',
 };
 
+const getSessionStatusText = (session: DecisionSession): string => {
+  if (session.processingStatus === 'pending' || session.processingStatus === 'running') {
+    return '裁决中';
+  }
+
+  return statusText[session.finalStatus];
+};
+
 const HistoryPage = (): JSX.Element => {
   const [sessions, setSessions] = useState<DecisionSession[]>([]);
 
@@ -33,7 +41,7 @@ const HistoryPage = (): JSX.Element => {
       {sessions.map((session: DecisionSession): JSX.Element => (
         <View key={session.id} className="history-item" onClick={(): void => openSession(session.id)}>
           <Text className="history-question">{session.question}</Text>
-          <Text className="history-status">{statusText[session.finalStatus]}</Text>
+          <Text className="history-status">{getSessionStatusText(session)}</Text>
         </View>
       ))}
     </View>

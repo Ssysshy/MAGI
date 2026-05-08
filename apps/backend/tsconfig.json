@@ -5,7 +5,10 @@
     "moduleResolution": "NodeNext",
     "outDir": "dist",
     "rootDir": "src",
-    "types": ["node"]
+    "types": ["node"],
+    "paths": {
+      "@magi/shared": ["../../packages/shared/dist/index.d.ts"]
+    }
   },
   "include": ["src"]
 }

@@ -3,17 +3,43 @@
   margin-bottom: 28px;
   padding: 42px 24px 30px;
   border: 2px solid;
-  background: rgba(50, 0, 0, 0.5);
+  background: rgba(8, 8, 8, 0.7);
 }
 
-.analysis-red {
+.analysis-pending {
+  border-color: #5c493c;
+  color: #8d7564;
+}
+
+.analysis-running {
+  border-color: #d87932;
+  color: #f0a35b;
+  box-shadow: inset 0 0 24px rgba(216, 121, 50, 0.18);
+}
+
+.analysis-approved {
+  border-color: #3aae53;
+  color: #45b966;
+}
+
+.analysis-rejected {
   border-color: #cf2637;
   color: #cf3341;
 }
 
-.analysis-green {
-  border-color: #3aae53;
-  color: #45b966;
+.analysis-deferred {
+  border-color: #d87932;
+  color: #f0a35b;
+}
+
+.analysis-refused {
+  border-color: #8d5a42;
+  color: #b0785d;
+}
+
+.analysis-failed {
+  border-color: #8d5a42;
+  color: #b0785d;
 }
 
 .analysis-title {

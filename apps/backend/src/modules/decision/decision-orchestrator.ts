@@ -1,7 +1,16 @@
 import Bottleneck from 'bottleneck';
 import pLimit from 'p-limit';
 import { z } from 'zod';
-import type { DecisionSession, FinalStatus } from '@magi/shared';
+import type {
+  BrainAnalysis,
+  BrainType,
+  DecisionSession,
+  DecisionSummary,
+  DecisionVariable,
+  FinalStatus,
+  QuestionType,
+} from '@magi/shared';
+import { env } from '../../config/env.js';
 import { requestLlmJson, type LlmConfig } from './llm-client.js';
 
 const decisionLimit = pLimit(5);
@@ -9,30 +18,17 @@ const llmLimiter = new Bottleneck({
   minTime: 500,
   maxConcurrent: 3,
 });
+const DECISION_LLM_TIMEOUT_MS = env.DECISION_LLM_TIMEOUT_MS;
+const MELCHIOR_LLM_TIMEOUT_MS = env.MELCHIOR_TIMEOUT_MS ?? env.DECISION_LLM_TIMEOUT_MS;
 
-const brainAnalysisSchema = z.object({
-  brainType: z.enum(['melchior', 'balthasar', 'casper']),
-  stance: z.enum(['approve', 'reject', 'defer', 'uncertain']),
-  reason: z.string(),
-  focusPoints: z.array(z.string()),
-  uncertainties: z.array(z.string()),
-  unavailable: z.boolean().optional(),
-});
+const questionTypeSchema = z.enum(['boolean', 'multiple_choice', 'priority', 'strategy', 'diagnosis']);
+const finalStatusSchema = z.enum(['approved', 'rejected', 'deferred', 'refused']);
+const brainStanceSchema = z.enum(['approve', 'reject', 'defer', 'uncertain']);
 
-const decisionDraftSchema = z.object({
-  userId: z.string(),
-  question: z.string(),
-  questionType: z.enum(['boolean', 'multiple_choice', 'priority', 'strategy', 'diagnosis']),
-  finalStatus: z.enum(['approved', 'rejected', 'deferred', 'refused']),
+const coreDecisionSchema = z.object({
+  finalStatus: finalStatusSchema,
   summary: z.string(),
   confidence: z.number().min(0).max(1),
-  variables: z.array(z.object({
-    name: z.string(),
-    value: z.string(),
-    isMissing: z.boolean(),
-    isCritical: z.boolean(),
-  })),
-  analyses: z.array(brainAnalysisSchema).length(3),
   decisionSummary: z.object({
     rule: z.string(),
     majorityOpinion: z.string(),
@@ -42,17 +38,56 @@ const decisionDraftSchema = z.object({
   }),
 });
 
-export interface OrchestrateDecisionInput {
-  userId: string;
-  question: string;
-  config: LlmConfig;
-}
-
 type DecisionDraft = Omit<DecisionSession, 'id' | 'createdAt'>;
-type BrainType = 'melchior' | 'balthasar' | 'casper';
 type AppError = Error & { statusCode: number };
 
 const BRAIN_TYPES: BrainType[] = ['melchior', 'balthasar', 'casper'];
+const BRAIN_ROLES: Record<BrainType, string> = {
+  melchior: '科学家（逻辑、效率、条件完备性）',
+  balthasar: '母亲（情绪、关系、承受度）',
+  casper: '智者（经验、现实、可执行性）',
+};
+const REJECT_STANCE_RE = /(绝不能|不能闯|禁止|违法|违规|严重|高风险|不可执行|不应|不能做|否决|危险|危害|不合理)/;
+const APPROVE_STANCE_RE = /(可以执行|建议通过|推荐执行|支持执行|认可|可行)/;
+const DEFER_STANCE_RE = /(延后|暂缓|等待|条件不足|时机未到|暂不建议)/;
+const OBVIOUS_RISK_QUESTION_RE = /(红灯|闯红灯|酒驾|吸毒驾驶|撞人|伤害|暴力|非法|违法|犯罪|自杀|毒品|纵火|抢劫)/;
+const FIELD_DEGRADE_FOCUS_POINT = '字段级降级路径';
+const RULE_DEGRADE_FOCUS_POINT = '规则直判降级路径';
+const ANALYSIS_REASON_KEYS = ['reason', 'summary', 'recommendation', 'conclusion', 'advice', 'opinion', 'judgment', 'judgement', 'decision', 'analysis'];
+const ANALYSIS_FOCUS_KEYS = ['focusPoints', 'keyPoints', 'points', 'highlights', 'considerations'];
+const ANALYSIS_UNCERTAINTY_KEYS = ['uncertainties', 'missingInformation', 'unknowns', 'assumptions', 'dependencies', 'risks'];
+const CORE_RULE_KEYS = ['rule', 'principle', 'policy', 'basis'];
+const CORE_MAJORITY_KEYS = ['majorityOpinion', 'majority', 'consensus', 'summary'];
+const CORE_MINORITY_KEYS = ['minorityOpinion', 'minority', 'dissent', 'counterpoint'];
+const CORE_FINAL_DECISION_KEYS = ['finalDecision', 'decision', 'recommendation', 'conclusion', 'summary'];
+const CORE_MISSING_INFO_KEYS = ['missingInformation', 'missingInfo', 'uncertainties', 'unknowns', 'dependencies'];
+
+const getDefaultVariablesForQuestion = (question: string): DecisionVariable[] => {
+  if (OBVIOUS_RISK_QUESTION_RE.test(question)) {
+    return [
+      {
+        name: '法律规则明确性',
+        value: '明确禁止',
+        isMissing: false,
+        isCritical: false,
+      },
+      {
+        name: '人身安全风险',
+        value: '高',
+        isMissing: false,
+        isCritical: false,
+      },
+      {
+        name: '是否存在紧急法定例外',
+        value: '',
+        isMissing: true,
+        isCritical: false,
+      },
+    ];
+  }
+
+  return [];
+};
 
 const toText = (value: unknown): string => {
   if (typeof value === 'string') {
@@ -66,14 +101,109 @@ const toText = (value: unknown): string => {
   return '';
 };
 
-const toQuestionType = (value: unknown): DecisionDraft['questionType'] => {
-  const raw = toText(value);
+const toRecord = (value: unknown): Record<string, unknown> => (
+  value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+);
 
-  if (raw === 'boolean' || raw === 'multiple_choice' || raw === 'priority' || raw === 'strategy' || raw === 'diagnosis') {
-    return raw;
+const normalizeLookupKey = (value: string): string => value
+  .trim()
+  .toLowerCase()
+  .replace(/[\s_-]+/g, '')
+  .replace(/[()（）]/g, '');
+
+const mergeUniqueTexts = (...groups: string[][]): string[] => {
+  const seen = new Set<string>();
+  const merged: string[] = [];
+
+  for (const group of groups) {
+    for (const item of group) {
+      const text = toText(item);
+
+      if (!text || seen.has(text)) {
+        continue;
+      }
+
+      seen.add(text);
+      merged.push(text);
+    }
   }
 
-  return 'strategy';
+  return merged;
+};
+
+const toStringArray = (value: unknown): string[] => (
+  Array.isArray(value) ? value.map(toText).filter(Boolean) : []
+);
+
+const QUESTION_TYPE_ALIASES: Record<string, QuestionType> = {
+  boolean: 'boolean',
+  yesno: 'boolean',
+  truefalse: 'boolean',
+  是非判断: 'boolean',
+  判断题: 'boolean',
+  singlechoice: 'multiple_choice',
+  multiplechoice: 'multiple_choice',
+  choice: 'multiple_choice',
+  option: 'multiple_choice',
+  选项: 'multiple_choice',
+  选择题: 'multiple_choice',
+  priority: 'priority',
+  priorityranking: 'priority',
+  ranking: 'priority',
+  优先级: 'priority',
+  排序: 'priority',
+  strategy: 'strategy',
+  strategic: 'strategy',
+  projectdecision: 'strategy',
+  projectmanagement: 'strategy',
+  solutionselection: 'strategy',
+  planselection: 'strategy',
+  strategylike: 'strategy',
+  决策: 'strategy',
+  项目决策: 'strategy',
+  项目管理: 'strategy',
+  方案选择: 'strategy',
+  技术方案: 'strategy',
+  策略: 'strategy',
+  诊断: 'diagnosis',
+  diagnosis: 'diagnosis',
+  diagnostic: 'diagnosis',
+};
+
+const resolveQuestionType = (value: unknown): { questionType: QuestionType; degraded: boolean; raw: string } => {
+  const raw = toText(value);
+
+  if (!raw) {
+    return {
+      questionType: 'strategy',
+      degraded: true,
+      raw,
+    };
+  }
+
+  if (questionTypeSchema.safeParse(raw).success) {
+    return {
+      questionType: raw as QuestionType,
+      degraded: false,
+      raw,
+    };
+  }
+
+  const alias = QUESTION_TYPE_ALIASES[normalizeLookupKey(raw)];
+
+  if (alias) {
+    return {
+      questionType: alias,
+      degraded: false,
+      raw,
+    };
+  }
+
+  return {
+    questionType: 'strategy',
+    degraded: true,
+    raw,
+  };
 };
 
 const toConfidence = (value: unknown): number => {
@@ -92,27 +222,13 @@ const toConfidence = (value: unknown): number => {
   return value;
 };
 
-const toVariables = (value: unknown): DecisionDraft['variables'] => {
+const toVariables = (value: unknown): DecisionVariable[] => {
   if (!Array.isArray(value)) {
     return [];
   }
 
   return value
-    .map((item): DecisionDraft['variables'][number] | null => {
-      if (typeof item === 'string') {
-        const name = item.trim();
-        if (!name) {
-          return null;
-        }
-
-        return {
-          name,
-          value: '',
-          isMissing: true,
-          isCritical: false,
-        };
-      }
-
+    .map((item): DecisionVariable | null => {
       if (!item || typeof item !== 'object') {
         return null;
       }
@@ -131,24 +247,293 @@ const toVariables = (value: unknown): DecisionDraft['variables'] => {
         isCritical: typeof row.isCritical === 'boolean' ? row.isCritical : false,
       };
     })
-    .filter((item): item is DecisionDraft['variables'][number] => item !== null);
+    .filter((item): item is DecisionVariable => item !== null);
 };
 
-const toBrainAnalysis = (
+const extractFirstTextByKeys = (row: Record<string, unknown>, keys: string[]): string => {
+  for (const key of keys) {
+    const text = toText(row[key]);
+
+    if (text) {
+      return text;
+    }
+  }
+
+  return '';
+};
+
+const extractFirstArrayByKeys = (row: Record<string, unknown>, keys: string[]): string[] => {
+  for (const key of keys) {
+    const values = toStringArray(row[key]);
+
+    if (values.length > 0) {
+      return values;
+    }
+  }
+
+  return [];
+};
+
+const toAnalysisPreview = (value: unknown): string => {
+  if (typeof value === 'string') {
+    return value.slice(0, 160);
+  }
+
+  if (value && typeof value === 'object') {
+    const json = JSON.stringify(value);
+    return json.length > 160 ? `${json.slice(0, 160)}...` : json;
+  }
+
+  return toText(value).slice(0, 160);
+};
+
+interface NormalizedAnalysisInput {
+  normalized: unknown;
+  hasSignal: boolean;
+  issues: string[];
+  valueType: string;
+  preview: string;
+}
+
+const normalizeAnalysisInput = (value: unknown): NormalizedAnalysisInput => {
+  if (typeof value === 'string') {
+    const reason = toText(value);
+
+    return {
+      normalized: reason ? { reason } : {},
+      hasSignal: reason.length > 0,
+      issues: reason.length > 0
+        ? ['analysis.focusPoints 缺失，已使用默认值', 'analysis.uncertainties 缺失，已使用默认值']
+        : ['analysis.reason 缺失，已使用默认值', 'analysis.focusPoints 缺失，已使用默认值', 'analysis.uncertainties 缺失，已使用默认值'],
+      valueType: 'string',
+      preview: toAnalysisPreview(value),
+    };
+  }
+
+  const row = toRecord(value);
+  const stanceRaw = toText(row.stance);
+  const reason = extractFirstTextByKeys(row, ANALYSIS_REASON_KEYS);
+  const focusPoints = extractFirstArrayByKeys(row, ANALYSIS_FOCUS_KEYS);
+  const uncertainties = extractFirstArrayByKeys(row, ANALYSIS_UNCERTAINTY_KEYS);
+  const hasValidStance = brainStanceSchema.safeParse(stanceRaw).success;
+  const issues: string[] = [];
+
+  if (stanceRaw && !hasValidStance) {
+    issues.push('analysis.stance 非法，已按文本语义推断');
+  }
+
+  if (!reason) {
+    issues.push('analysis.reason 缺失，已使用默认值');
+  }
+
+  if (focusPoints.length === 0) {
+    issues.push('analysis.focusPoints 缺失，已使用默认值');
+  }
+
+  if (uncertainties.length === 0) {
+    issues.push('analysis.uncertainties 缺失，已使用默认值');
+  }
+
+  return {
+    normalized: {
+      ...(hasValidStance ? { stance: stanceRaw } : {}),
+      ...(reason ? { reason } : {}),
+      ...(focusPoints.length > 0 ? { focusPoints } : {}),
+      ...(uncertainties.length > 0 ? { uncertainties } : {}),
+    },
+    hasSignal: hasValidStance || reason.length > 0 || focusPoints.length > 0 || uncertainties.length > 0,
+    issues,
+    valueType: Array.isArray(value) ? 'array' : typeof value,
+    preview: toAnalysisPreview(value),
+  };
+};
+
+const logPartialSchema = (
+  brainType: BrainType,
+  issues: string[],
+  value: unknown,
+  diagnostics?: { rawQuestionType?: string; analysisValueType?: string; analysisPreview?: string },
+): void => {
+  if (issues.length === 0) {
+    return;
+  }
+
+  const row = toRecord(value);
+
+  console.warn('[decision.brain.partial]', {
+    brainType,
+    errorCode: 'LLM_SCHEMA_PARTIAL_INVALID',
+    issues,
+    resultType: Array.isArray(value) ? 'array' : typeof value,
+    topLevelKeys: Object.keys(row).slice(0, 12),
+    rawQuestionType: diagnostics?.rawQuestionType ?? null,
+    analysisValueType: diagnostics?.analysisValueType ?? null,
+    analysisPreview: diagnostics?.analysisPreview ?? null,
+  });
+};
+
+const inferBrainStance = (reason: string, focusPoints: string[]): BrainAnalysis['stance'] => {
+  const combinedText = [reason, ...focusPoints].join(' ');
+
+  if (REJECT_STANCE_RE.test(combinedText)) {
+    return 'reject';
+  }
+
+  if (DEFER_STANCE_RE.test(combinedText)) {
+    return 'defer';
+  }
+
+  if (APPROVE_STANCE_RE.test(combinedText)) {
+    return 'approve';
+  }
+
+  return 'uncertain';
+};
+
+const toDecisionSummary = (value: unknown, summary: string): DecisionSummary => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {
+      rule: summary,
+      majorityOpinion: summary,
+      minorityOpinion: '无',
+      missingInformation: [],
+      finalDecision: summary,
+    };
+  }
+
+  const row = value as Record<string, unknown>;
+
+  return {
+    rule: toText(row.rule) || summary,
+    majorityOpinion: toText(row.majorityOpinion) || summary,
+    minorityOpinion: toText(row.minorityOpinion) || '无',
+    missingInformation: Array.isArray(row.missingInformation) ? row.missingInformation.map(toText).filter(Boolean) : [],
+    finalDecision: toText(row.finalDecision) || summary,
+  };
+};
+
+const normalizeCoreDecisionSummary = (
+  value: unknown,
+  summary: string,
+): { summary: DecisionSummary; issues: string[]; valueType: string; preview: string } => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    const summaryText = toText(value) || summary;
+    const issues = summaryText
+      ? ['decisionSummary 非标准对象，已按 summary 自动补齐']
+      : ['decisionSummary 缺失，已按 summary 自动补齐'];
+
+    return {
+      summary: {
+        rule: summary,
+        majorityOpinion: summary,
+        minorityOpinion: '无',
+        missingInformation: [],
+        finalDecision: summaryText || summary,
+      },
+      issues,
+      valueType: Array.isArray(value) ? 'array' : typeof value,
+      preview: toAnalysisPreview(value),
+    };
+  }
+
+  const row = toRecord(value);
+  const rule = extractFirstTextByKeys(row, CORE_RULE_KEYS) || summary;
+  const majorityOpinion = extractFirstTextByKeys(row, CORE_MAJORITY_KEYS) || summary;
+  const minorityOpinion = extractFirstTextByKeys(row, CORE_MINORITY_KEYS) || '无';
+  const finalDecision = extractFirstTextByKeys(row, CORE_FINAL_DECISION_KEYS) || summary;
+  const missingInformation = extractFirstArrayByKeys(row, CORE_MISSING_INFO_KEYS);
+  const issues: string[] = [];
+
+  if (!toText(row.rule) && rule === summary) {
+    issues.push('decisionSummary.rule 缺失，已按 summary 自动补齐');
+  }
+
+  if (!toText(row.majorityOpinion) && majorityOpinion === summary) {
+    issues.push('decisionSummary.majorityOpinion 缺失，已按 summary 自动补齐');
+  }
+
+  if (!toText(row.finalDecision) && finalDecision === summary) {
+    issues.push('decisionSummary.finalDecision 缺失，已按 summary 自动补齐');
+  }
+
+  if (!Array.isArray(row.missingInformation) && missingInformation.length === 0) {
+    issues.push('decisionSummary.missingInformation 缺失，已回退为空数组');
+  }
+
+  return {
+    summary: {
+      rule,
+      majorityOpinion,
+      minorityOpinion,
+      missingInformation,
+      finalDecision,
+    },
+    issues,
+    valueType: typeof value,
+    preview: toAnalysisPreview(value),
+  };
+};
+
+const normalizeCoreDecision = (
+  result: unknown,
+): {
+  finalStatus: FinalStatus;
+  summary: string;
+  confidence: number;
+  decisionSummary: DecisionSummary;
+  issues: string[];
+} => {
+  const row = toRecord(result);
+  const finalStatus = toFinalStatus(row.finalStatus);
+  const summary = toText(row.summary) || extractFirstTextByKeys(row, ['decision', 'recommendation', 'conclusion']) || '信息不足';
+  const confidence = toConfidence(row.confidence);
+  const decisionSummaryResult = normalizeCoreDecisionSummary(row.decisionSummary, summary);
+  const issues = [...decisionSummaryResult.issues];
+
+  if (!toText(row.finalStatus)) {
+    issues.push('finalStatus 缺失，已回退为 refused');
+  }
+
+  if (!toText(row.summary)) {
+    issues.push(summary === '信息不足' ? 'summary 缺失，已使用默认值' : 'summary 缺失，已从别名字段提取');
+  }
+
+  return {
+    finalStatus,
+    summary,
+    confidence,
+    decisionSummary: decisionSummaryResult.summary,
+    issues,
+  };
+};
+
+const toFinalStatus = (value: unknown): FinalStatus => {
+  const raw = toText(value);
+
+  if (raw === 'approved' || raw === 'rejected' || raw === 'deferred' || raw === 'refused') {
+    return raw;
+  }
+
+  return 'refused';
+};
+
+const normalizeBrainAnalysis = (
   brainType: BrainType,
   value: unknown,
-): DecisionDraft['analyses'][number] => {
-  const row = (value && typeof value === 'object' ? value : {}) as Record<string, unknown>;
-  const reason = toText(row.reason) || toText(row.analysis) || toText(value) || '信息不足';
+  status: BrainAnalysis['status'],
+): BrainAnalysis => {
+  const row = toRecord(value);
   const stanceRaw = toText(row.stance);
+  const reason = toText(row.reason) || toText(row.analysis) || '信息不足';
+  const focusPoints = toStringArray(row.focusPoints);
   const stance = stanceRaw === 'approve' || stanceRaw === 'reject' || stanceRaw === 'defer' || stanceRaw === 'uncertain'
     ? stanceRaw
-    : 'uncertain';
-  const focusPoints = Array.isArray(row.focusPoints) ? row.focusPoints.map(toText).filter(Boolean) : [];
-  const uncertainties = Array.isArray(row.uncertainties) ? row.uncertainties.map(toText).filter(Boolean) : [];
+    : inferBrainStance(reason, focusPoints);
+  const uncertainties = toStringArray(row.uncertainties);
 
   return {
     brainType,
+    status,
     stance,
     reason,
     focusPoints: focusPoints.length > 0 ? focusPoints : ['信息不足'],
@@ -157,142 +542,109 @@ const toBrainAnalysis = (
   };
 };
 
-const toAnalyses = (value: unknown): DecisionDraft['analyses'] => {
-  const rows = (Array.isArray(value) ? value : []) as Array<Record<string, unknown>>;
-  const mapByBrain = new Map<BrainType, Record<string, unknown>>();
-
-  rows.forEach((item) => {
-    const brainType = toText(item.brainType) as BrainType;
-
-    if (brainType === 'melchior' || brainType === 'balthasar' || brainType === 'casper') {
-      mapByBrain.set(brainType, item);
-    }
-  });
-
-  if (!Array.isArray(value) && value && typeof value === 'object') {
-    const objectValue = value as Record<string, unknown>;
-    BRAIN_TYPES.forEach((brainType) => {
-      if (objectValue[brainType] && !mapByBrain.has(brainType)) {
-        mapByBrain.set(brainType, objectValue[brainType] as Record<string, unknown>);
-      }
-    });
+const enrichBrainAnalysis = (
+  brainType: BrainType,
+  analysis: BrainAnalysis,
+  issues: string[],
+  options?: { includeRuleDegrade?: boolean },
+): BrainAnalysis => {
+  if (issues.length === 0) {
+    return analysis;
   }
 
-  return BRAIN_TYPES.map((brainType) => toBrainAnalysis(brainType, mapByBrain.get(brainType)));
-};
-
-const toDecisionSummary = (value: unknown, summary: string): DecisionDraft['decisionSummary'] => {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    const text = toText(value) || summary || '信息不足';
-    return {
-      rule: text,
-      majorityOpinion: text,
-      minorityOpinion: '无',
-      missingInformation: [],
-      finalDecision: text,
-    };
-  }
-
-  const row = value as Record<string, unknown>;
-  const rule = toText(row.rule) || summary || '信息不足';
-  const majorityOpinion = toText(row.majorityOpinion) || toText(row.finalDecision) || summary || '信息不足';
-  const minorityOpinion = toText(row.minorityOpinion) || '无';
-  const missingInformation = Array.isArray(row.missingInformation) ? row.missingInformation.map(toText).filter(Boolean) : [];
-  const finalDecision = toText(row.finalDecision) || summary || majorityOpinion;
+  const focusPoints = mergeUniqueTexts(
+    options?.includeRuleDegrade ? [RULE_DEGRADE_FOCUS_POINT, FIELD_DEGRADE_FOCUS_POINT] : [FIELD_DEGRADE_FOCUS_POINT],
+    analysis.focusPoints,
+  );
+  const uncertainties = mergeUniqueTexts(issues, analysis.uncertainties);
+  const reason = analysis.reason === '信息不足'
+    ? `${issues[0]}，已按降级策略继续裁决`
+    : analysis.reason;
 
   return {
-    rule,
-    majorityOpinion,
-    minorityOpinion,
-    missingInformation,
-    finalDecision,
+    ...analysis,
+    brainType,
+    reason,
+    focusPoints,
+    uncertainties,
+    unavailable: false,
   };
 };
 
-const normalizeDecisionDraft = (
-  raw: unknown,
+const createPendingAnalysis = (brainType: BrainType): BrainAnalysis => ({
+  brainType,
+  status: 'pending',
+  stance: 'uncertain',
+  reason: `等待 ${brainType.toUpperCase()} 接入`,
+  focusPoints: ['等待裁决启动'],
+  uncertainties: ['尚未开始分析'],
+  unavailable: false,
+});
+
+const createFailedAnalysis = (brainType: BrainType, reason: string): BrainAnalysis => ({
+  brainType,
+  status: 'failed',
+  stance: 'uncertain',
+  reason,
+  focusPoints: ['裁决链路降级'],
+  uncertainties: [reason],
+  unavailable: true,
+});
+
+export const createPendingAnalyses = (): BrainAnalysis[] => BRAIN_TYPES.map((brainType) => createPendingAnalysis(brainType));
+
+export const createPlaceholderDecisionSummary = (summary: string): DecisionSummary => ({
+  rule: '等待主控汇总',
+  majorityOpinion: summary,
+  minorityOpinion: '无',
+  missingInformation: [],
+  finalDecision: summary,
+});
+
+export const createPendingDecision = (
   userId: string,
   question: string,
-): DecisionDraft => {
-  const row = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
-  const summary = toText(row.summary) || toText(row.decisionSummary) || '信息不足';
-
-  return {
-    userId,
-    question,
-    questionType: toQuestionType(row.questionType),
-    finalStatus: normalizeStatus(toText(row.finalStatus)),
-    summary,
-    confidence: toConfidence(row.confidence),
-    variables: toVariables(row.variables),
-    analyses: toAnalyses(row.analyses),
-    decisionSummary: toDecisionSummary(row.decisionSummary, summary),
-  };
-};
+): DecisionDraft => ({
+  userId,
+  question,
+  questionType: 'strategy',
+  processingStage: 'queued',
+  processingStatus: 'running',
+  finalStatus: 'refused',
+  summary: '等待裁决完成',
+  confidence: 0,
+  variables: [],
+  analyses: createPendingAnalyses(),
+  decisionSummary: createPlaceholderDecisionSummary('等待输入议题后开始本次裁决'),
+});
 
 export const createRefusedDecision = (
   userId: string,
   question: string,
   reason: string,
+  variables: DecisionVariable[] = [],
+  analyses: BrainAnalysis[] = createPendingAnalyses(),
 ): DecisionDraft => ({
-  // 统一降级出口：LLM 超时、格式错误、调用失败都落到拒绝裁决。
   userId,
   question,
   questionType: 'strategy',
+  processingStage: 'completed',
+  processingStatus: 'completed',
   finalStatus: 'refused',
   summary: reason,
   confidence: 0,
-  variables: [
-    {
-      name: '关键变量',
-      value: '',
-      isMissing: true,
-      isCritical: true,
-    },
-  ],
-  analyses: [
-    {
-      brainType: 'melchior',
-      stance: 'uncertain',
-      reason,
-      focusPoints: ['逻辑条件不足'],
-      uncertainties: [reason],
-      unavailable: true,
-    },
-    {
-      brainType: 'balthasar',
-      stance: 'uncertain',
-      reason,
-      focusPoints: ['人因条件不足'],
-      uncertainties: [reason],
-      unavailable: true,
-    },
-    {
-      brainType: 'casper',
-      stance: 'uncertain',
-      reason,
-      focusPoints: ['经验样本不足'],
-      uncertainties: [reason],
-      unavailable: true,
-    },
-  ],
+  variables,
+  analyses,
   decisionSummary: {
     rule: '关键变量缺失或系统不可用',
-    majorityOpinion: '无法形成多数意见',
+    majorityOpinion: '主控未形成通过结论',
     minorityOpinion: '无',
-    missingInformation: [reason],
+    missingInformation: variables
+      .filter((item: DecisionVariable): boolean => item.isMissing)
+      .map((item: DecisionVariable): string => item.name),
     finalDecision: reason,
   },
 });
-
-const normalizeStatus = (status: string): FinalStatus => {
-  // 模型返回非白名单状态时不做猜测，直接按拒绝裁决处理。
-  if (status === 'approved' || status === 'rejected' || status === 'deferred' || status === 'refused') {
-    return status;
-  }
-
-  return 'refused';
-};
 
 const createDecisionUnavailableError = (cause?: unknown): AppError => {
   const error = new Error('DECISION_SERVICE_UNAVAILABLE', cause === undefined ? undefined : { cause }) as AppError;
@@ -314,41 +666,224 @@ const isLlmServiceError = (error: unknown): boolean => {
     return true;
   }
 
-  return (
-    error.message.startsWith('LLM_')
-    || error.message === 'DECISION_SERVICE_UNAVAILABLE'
+  return error.message.startsWith('LLM_') || error.message === 'DECISION_SERVICE_UNAVAILABLE';
+};
+
+const requestDecisionJson = async <T>(
+  config: LlmConfig,
+  messages: Array<{ role: 'system' | 'user'; content: string }>,
+  options?: { brainType?: 'melchior' | 'balthasar' | 'casper' | 'core'; timeoutMs?: number },
+): Promise<T> => {
+  let lastError: unknown;
+  const timeoutMs = options?.timeoutMs ?? DECISION_LLM_TIMEOUT_MS;
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await llmLimiter.schedule(() => requestLlmJson<T>(config, messages, timeoutMs, {
+        brainType: options?.brainType ?? 'unknown',
+        attempts: 1,
+        onAttemptDone: (context): void => {
+          const payload = {
+            brainType: context.brainType,
+            attempt: attempt + 1,
+            durationMs: context.durationMs,
+            timeoutMs: context.timeoutMs,
+            httpStatus: context.httpStatus,
+            errorCode: context.errorCode,
+            model: context.model,
+            baseUrlHost: context.baseUrlHost,
+            responseFormatType: context.responseFormatType,
+            contentPreview: context.contentPreview,
+            contentLength: context.contentLength,
+          };
+
+          if (context.errorCode) {
+            console.warn('[decision.llm.attempt]', payload);
+            return;
+          }
+
+          console.info('[decision.llm.attempt]', payload);
+        },
+      }));
+    } catch (error) {
+      lastError = error;
+
+      if (!isLlmServiceError(error) || attempt === 1) {
+        throw error;
+      }
+    }
+  }
+
+  if (isHardLlmError(lastError)) {
+    throw createDecisionUnavailableError(lastError);
+  }
+
+  throw lastError ?? createDecisionUnavailableError();
+};
+
+interface BrainDecisionInput {
+  question: string;
+  questionType: QuestionType;
+  variables: DecisionVariable[];
+  config: LlmConfig;
+}
+
+interface MelchiorDecision {
+  questionType: QuestionType;
+  variables: DecisionVariable[];
+  analysis: BrainAnalysis;
+}
+
+type MelchiorMode = 'strict' | 'relaxed';
+
+const buildMelchiorDecision = (
+  question: string,
+  result: unknown,
+  mode: MelchiorMode,
+): MelchiorDecision => {
+  const row = toRecord(result);
+  const fallbackVariables = getDefaultVariablesForQuestion(question);
+  const variables = toVariables(row.variables);
+  const questionTypeResult = resolveQuestionType(row.questionType);
+  const normalizedAnalysisInput = normalizeAnalysisInput(row.analysis);
+  const issues: string[] = [];
+
+  if (questionTypeResult.degraded) {
+    issues.push('questionType 非法，已回退为 strategy');
+  }
+
+  if (!Array.isArray(row.variables)) {
+    issues.push(
+      fallbackVariables.length > 0
+        ? 'variables 缺失，已使用默认变量'
+        : 'variables 缺失，当前无可用默认变量',
+    );
+  } else if (variables.length === 0) {
+    issues.push(
+      fallbackVariables.length > 0
+        ? 'variables 无有效项，已使用默认变量'
+        : 'variables 无有效项，当前无可用默认变量',
+    );
+  }
+
+  issues.push(...normalizedAnalysisInput.issues);
+  logPartialSchema('melchior', issues, result, {
+    rawQuestionType: questionTypeResult.raw,
+    analysisValueType: normalizedAnalysisInput.valueType,
+    analysisPreview: normalizedAnalysisInput.preview,
+  });
+
+  const normalizedAnalysis = normalizeBrainAnalysis('melchior', normalizedAnalysisInput.normalized, 'completed');
+  const finalVariables = variables.length > 0 ? variables : fallbackVariables;
+  const finalAnalysisBase = mode === 'relaxed' && !normalizedAnalysisInput.hasSignal && finalVariables.length > 0
+    ? {
+        brainType: 'melchior' as const,
+        status: 'completed' as const,
+        stance: 'reject' as const,
+        reason: '模型返回结构不完整，已按规则直判降级处理',
+        focusPoints: [RULE_DEGRADE_FOCUS_POINT, '采用默认规则变量继续裁决'],
+        uncertainties: issues.length > 0 ? issues : ['模型返回结构不完整'],
+        unavailable: false,
+      }
+    : normalizedAnalysis;
+  const finalAnalysis = enrichBrainAnalysis('melchior', finalAnalysisBase, issues, {
+    includeRuleDegrade: mode === 'relaxed',
+  });
+
+  if (!normalizedAnalysisInput.hasSignal && (mode === 'strict' || finalVariables.length === 0)) {
+    throw new Error('LLM_SCHEMA_PARTIAL_INVALID');
+  }
+
+  return {
+    questionType: questionTypeResult.questionType,
+    variables: finalVariables,
+    analysis: finalAnalysis,
+  };
+};
+
+const buildBrainAnalysis = (
+  brainType: Exclude<BrainType, 'melchior'>,
+  result: unknown,
+): BrainAnalysis => {
+  const normalizedAnalysisInput = normalizeAnalysisInput(result);
+
+  logPartialSchema(brainType, normalizedAnalysisInput.issues, result, {
+    analysisValueType: normalizedAnalysisInput.valueType,
+    analysisPreview: normalizedAnalysisInput.preview,
+  });
+
+  return enrichBrainAnalysis(
+    brainType,
+    normalizeBrainAnalysis(brainType, normalizedAnalysisInput.normalized, 'completed'),
+    normalizedAnalysisInput.issues,
   );
 };
 
-export const orchestrateDecision = async (
-  input: OrchestrateDecisionInput,
-): Promise<DecisionDraft> => decisionLimit(async (): Promise<DecisionDraft> => {
-  try {
-    // decisionLimit 控制完整裁决并发，llmLimiter 控制实际 LLM 请求频率。
-    const draft = await llmLimiter.schedule(() => requestLlmJson<DecisionDraft>(
-      input.config,
-      [
-        {
-          role: 'system',
-          content: [
-            '你是 Magi Core，只执行一次裁决，不进行聊天。',
-            '必须返回严格 JSON，不要 Markdown。',
-            '字段必须包含 userId、question、questionType、finalStatus、summary、confidence、variables、analyses、decisionSummary。',
-            'finalStatus 只能是 approved、rejected、deferred、refused。',
-            'analyses 必须分别包含 melchior、balthasar、casper。',
-            '关键信息不足时必须返回 refused。',
-          ].join('\n'),
-        },
-        {
-          role: 'user',
-          content: JSON.stringify({ userId: input.userId, question: input.question }),
-        },
-      ],
-      25000,
-    ));
+const getLlmHttpStatus = (error: unknown): number | null => {
+  if (!(error instanceof Error)) {
+    return null;
+  }
 
-    // 服务端重新覆盖 userId/question，防止模型回写不可信字段污染持久化数据。
-    return decisionDraftSchema.parse(normalizeDecisionDraft(draft, input.userId, input.question));
+  const matched = error.message.match(/^LLM_HTTP_(\d{3})$/);
+
+  if (!matched) {
+    return null;
+  }
+
+  const status = Number.parseInt(matched[1], 10);
+
+  return Number.isNaN(status) ? null : status;
+};
+
+const isHardLlmError = (error: unknown): boolean => {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  if (error.name === 'AbortError') {
+    return true;
+  }
+
+  const status = getLlmHttpStatus(error);
+
+  return status === 401 || status === 403 || status === 429 || (typeof status === 'number' && status >= 500);
+};
+
+export const classifyMelchiorMode = (question: string): MelchiorMode => (
+  isObviousRiskQuestion(question) ? 'relaxed' : 'strict'
+);
+
+export const analyzeWithMelchior = async (
+  input: Pick<BrainDecisionInput, 'question' | 'config'>,
+): Promise<MelchiorDecision> => decisionLimit(async (): Promise<MelchiorDecision> => {
+  const mode = classifyMelchiorMode(input.question);
+
+  try {
+    const result = await requestDecisionJson<unknown>(input.config, [
+      {
+        role: 'system',
+        content: [
+          '你是 Magi 的 Melchior，只负责逻辑、效率和条件完备性判断。',
+          '必须返回严格 JSON，不要 Markdown。',
+          '字段必须包含 questionType、variables、analysis。',
+          'variables 每项包含 name、value、isMissing、isCritical。',
+          '必须返回至少 1 个变量；如果问题属于公共规则或基础安全判断，可以直接返回通用默认变量，不允许返回空数组。',
+          '要明确区分：未知变量 != 无法判断；如果仅缺边缘情境，不要因此返回空变量数组。',
+          '只有当某变量缺失会直接阻断裁决，且没有任何合理默认假设可以替代时，才允许标记 isCritical=true。',
+          '不要为了求稳把常见补充信息一律标成关键缺失；能在常识范围内继续判断时，isCritical 必须是 false。',
+          '除非问题本身完全无法判定，否则 critical 缺失项应控制在极少数。',
+          'analysis 仅描述 Melchior 的独立判断，不要替另外两个角色下结论。',
+        ].join('\n'),
+      },
+      {
+        role: 'user',
+        content: JSON.stringify({ question: input.question }),
+      },
+    ], {
+      brainType: 'melchior',
+      timeoutMs: MELCHIOR_LLM_TIMEOUT_MS,
+    });
+    return buildMelchiorDecision(input.question, result, mode);
   } catch (error) {
     if (isLlmServiceError(error)) {
       throw createDecisionUnavailableError(error);
@@ -357,3 +892,137 @@ export const orchestrateDecision = async (
     throw error;
   }
 });
+
+export const analyzeWithBrain = async (
+  brainType: Exclude<BrainType, 'melchior'>,
+  input: BrainDecisionInput,
+): Promise<BrainAnalysis> => decisionLimit(async (): Promise<BrainAnalysis> => {
+  try {
+    const result = await requestDecisionJson<unknown>(input.config, [
+      {
+        role: 'system',
+        content: [
+          `你是 Magi 的 ${brainType.toUpperCase()}，职责是 ${BRAIN_ROLES[brainType]}。`,
+          '必须返回严格 JSON，不要 Markdown。',
+          '字段必须包含 stance、reason、focusPoints、uncertainties。',
+          '如果你的理由已经明确支持或反对，stance 必须同步返回 approve 或 reject，不要保守地返回 uncertain。',
+          '只输出当前角色的独立判断，不要汇总最终裁决。',
+        ].join('\n'),
+      },
+      {
+        role: 'user',
+        content: JSON.stringify({
+          question: input.question,
+          questionType: input.questionType,
+          variables: input.variables,
+        }),
+      },
+    ], {
+      brainType,
+      timeoutMs: DECISION_LLM_TIMEOUT_MS,
+    });
+
+    return buildBrainAnalysis(brainType, result);
+  } catch (error) {
+    if (isLlmServiceError(error)) {
+      throw createDecisionUnavailableError(error);
+    }
+
+    throw error;
+  }
+});
+
+interface CoreDecisionInput {
+  question: string;
+  questionType: QuestionType;
+  variables: DecisionVariable[];
+  analyses: BrainAnalysis[];
+  config: LlmConfig;
+}
+
+export const summarizeWithCore = async (
+  input: CoreDecisionInput,
+): Promise<Pick<DecisionDraft, 'finalStatus' | 'summary' | 'confidence' | 'decisionSummary'>> => decisionLimit(async () => {
+  try {
+    const result = await requestDecisionJson<unknown>(input.config, [
+      {
+        role: 'system',
+        content: [
+          '你是 Magi Core，只负责综合三脑结果输出最终裁决。',
+          '必须返回严格 JSON，不要 Markdown。',
+          '字段必须包含 finalStatus、summary、confidence、decisionSummary。',
+          'finalStatus 只能是 approved、rejected、deferred、refused。',
+          'decisionSummary 必须包含 rule、majorityOpinion、minorityOpinion、missingInformation、finalDecision。',
+          '对公共规则明确、基础安全风险明确的问题，不要因为缺少边缘情境变量而返回 refused。',
+          '若问题本身明显违法、高风险，且已有角色明确反对，应优先返回 rejected。',
+          '若关键变量不足或三脑不可用，请返回 refused。',
+        ].join('\n'),
+      },
+      {
+        role: 'user',
+        content: JSON.stringify({
+          question: input.question,
+          questionType: input.questionType,
+          variables: input.variables,
+          analyses: input.analyses,
+        }),
+      },
+    ], {
+      brainType: 'core',
+      timeoutMs: DECISION_LLM_TIMEOUT_MS,
+    });
+    const normalized = normalizeCoreDecision(result);
+    const raw = toRecord(result);
+
+    if (normalized.issues.length > 0) {
+      console.warn('[decision.core.partial]', {
+        errorCode: 'LLM_SCHEMA_PARTIAL_INVALID',
+        issues: normalized.issues,
+        topLevelKeys: Object.keys(raw).slice(0, 12),
+        decisionSummaryType: Array.isArray(raw.decisionSummary) ? 'array' : typeof raw.decisionSummary,
+        decisionSummaryPreview: toAnalysisPreview(raw.decisionSummary),
+      });
+    }
+
+    if (!toText(raw.finalStatus) && normalized.summary === '信息不足') {
+      throw new Error('LLM_SCHEMA_PARTIAL_INVALID');
+    }
+
+    return {
+      finalStatus: normalized.finalStatus,
+      summary: normalized.summary,
+      confidence: normalized.confidence,
+      decisionSummary: normalized.decisionSummary,
+    };
+  } catch (error) {
+    if (isLlmServiceError(error)) {
+      throw createDecisionUnavailableError(error);
+    }
+
+    throw error;
+  }
+});
+
+export const hasCriticalMissingVariables = (variables: DecisionVariable[]): boolean => variables.some(
+  (item: DecisionVariable): boolean => item.isMissing && item.isCritical,
+);
+
+export const shouldRefuseForMissingVariables = (variables: DecisionVariable[]): boolean => {
+  const criticalMissingVariables = variables.filter(
+    (item: DecisionVariable): boolean => item.isMissing && item.isCritical,
+  );
+
+  if (criticalMissingVariables.length === 0) {
+    return false;
+  }
+
+  const filledVariablesCount = variables.filter(
+    (item: DecisionVariable): boolean => item.value.trim().length > 0 && !item.isMissing,
+  ).length;
+
+  return criticalMissingVariables.length >= 2 || filledVariablesCount === 0;
+};
+
+export const isObviousRiskQuestion = (question: string): boolean => OBVIOUS_RISK_QUESTION_RE.test(question);
+
+export const createBrainFailureResult = (brainType: BrainType, reason: string): BrainAnalysis => createFailedAnalysis(brainType, reason);

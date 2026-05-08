@@ -55,17 +55,40 @@
 .approve-box {
   width: 130px;
   margin-left: auto;
-  border: 2px solid #3aae53;
-  color: #60bf74;
   text-align: center;
   padding: 12px 0;
   font-size: 22px;
   font-weight: 800;
 }
 
+.approve-box-approved {
+  border: 2px solid #3aae53;
+  color: #60bf74;
+}
+
+.approve-box-pending {
+  border: 2px solid #8d5a42;
+  color: #8d7564;
+}
+
+.approve-box-rejected {
+  border: 2px solid #cf2637;
+  color: #cf3341;
+}
+
+.approve-box-deferred {
+  border: 2px solid #d87932;
+  color: #f0a35b;
+}
+
+.approve-box-refused {
+  border: 2px solid #8d5a42;
+  color: #b0785d;
+}
+
 .brain-map {
   position: relative;
-  height: 330px;
+  height: 360px;
   margin-top: -6px;
 }
 
@@ -78,24 +101,24 @@
 .link-left {
   width: 210px;
   height: 22px;
-  left: 190px;
-  top: 155px;
+  left: 75px;
+  top: 200px;
   transform: rotate(-46deg);
 }
 
 .link-right {
   width: 210px;
   height: 22px;
-  right: 184px;
-  top: 155px;
+  right: 75px;
+  top: 200px;
   transform: rotate(46deg);
 }
 
 .link-bottom {
   width: 330px;
   height: 20px;
-  left: 244px;
-  top: 240px;
+  left: 184px;
+  top: 380px;
 }
 
 .brain {
@@ -111,16 +134,38 @@
   letter-spacing: 0;
 }
 
-.brain-green {
+.brain-approved {
   background: #3aae53;
 }
 
-.brain-red {
+.brain-rejected {
   background: #cf2637;
 }
 
+.brain-deferred {
+  background: #d87932;
+}
+
+.brain-refused {
+  background: #7c5e4b;
+}
+
+.brain-pending {
+  background: #5c493c;
+  color: #1c1c1c;
+}
+
+.brain-failed {
+  background: #7c5e4b;
+}
+
+.brain-running {
+  background: #f0a35b;
+  animation: brain-pulse 1s ease-in-out infinite;
+}
+
 .brain-balthasar {
-  width: 260px;
+  width: 220px;
   height: 170px;
   left: 50%;
   top: 0;
@@ -129,7 +174,7 @@
 }
 
 .brain-casper {
-  width: 295px;
+  width: 255px;
   height: 170px;
   left: 0;
   bottom: 14px;
@@ -137,7 +182,7 @@
 }
 
 .brain-melchior {
-  width: 295px;
+  width: 255px;
   height: 170px;
   right: 0;
   bottom: 14px;
@@ -183,4 +228,18 @@
   font-size: 20px;
   font-weight: 900;
   letter-spacing: 3px;
+}
+
+@keyframes brain-pulse {
+  0% {
+    box-shadow: 0 0 0 rgba(240, 163, 91, 0.1);
+  }
+
+  50% {
+    box-shadow: 0 0 24px rgba(240, 163, 91, 0.5);
+  }
+
+  100% {
+    box-shadow: 0 0 0 rgba(240, 163, 91, 0.1);
+  }
 }

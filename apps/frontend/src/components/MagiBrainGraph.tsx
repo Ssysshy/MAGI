@@ -11,12 +11,72 @@ export interface MagiBrainGraphProps {
   decisionCode: string;
 }
 
-const getBrainClass = (brainType: string, finalStatus: FinalStatus, analyses: BrainAnalysis[]): string => {
-  const analysis = analyses.find((item: BrainAnalysis): boolean => item.brainType === brainType);
-  // Melchior 在参考图中固定承担红色否决位；最终否决时全部按高风险态处理。
-  const isNegative = analysis?.stance === 'reject' || finalStatus === 'rejected' || brainType === 'melchior';
+const getBrainVisualState = (analysis: BrainAnalysis, finalStatus: FinalStatus): string => {
+  if (analysis.status === 'pending') {
+    return 'pending';
+  }
 
-  return isNegative ? 'brain brain-red' : 'brain brain-green';
+  if (analysis.status === 'running') {
+    return 'running';
+  }
+
+  if (analysis.status === 'failed') {
+    return 'failed';
+  }
+
+  if (analysis.stance === 'approve') {
+    return 'approved';
+  }
+
+  if (analysis.stance === 'reject') {
+    return 'rejected';
+  }
+
+  if (analysis.stance === 'defer') {
+    return 'deferred';
+  }
+
+  if (finalStatus === 'refused') {
+    return 'refused';
+  }
+
+  return 'pending';
+};
+
+const getCoreStateText = (status: ConsoleStatus, finalStatus: FinalStatus, analyses: BrainAnalysis[]): string => {
+  if (analyses.every((analysis: BrainAnalysis): boolean => analysis.status === 'pending')) {
+    return '待机';
+  }
+
+  if (analyses.some((analysis: BrainAnalysis): boolean => analysis.status === 'running')) {
+    return '分析中';
+  }
+
+  if (status === 'QUESTION ACCEPTED') {
+    return '接收中';
+  }
+
+  if (status === 'ANALYZING') {
+    return '汇总中';
+  }
+
+  return GRAPH_FINAL_STATUS_TEXT[finalStatus];
+};
+
+const getResolveBoxText = (analyses: BrainAnalysis[], finalStatus: FinalStatus): string => {
+  if (analyses.every((analysis: BrainAnalysis): boolean => analysis.status === 'pending')) {
+    return '待机';
+  }
+
+  return GRAPH_FINAL_STATUS_TEXT[finalStatus];
+};
+
+const getResolveBoxClassName = (analyses: BrainAnalysis[], finalStatus: FinalStatus): string => {
+  if (analyses.every((analysis: BrainAnalysis): boolean => analysis.status === 'pending')) {
+    return 'approve-box-pending';
+  }
+
+  return `approve-box-${finalStatus}`;
 };
 
 export const MagiBrainGraph = ({ status, finalStatus, analyses, decisionCode }: MagiBrainGraphProps): JSX.Element => (
@@ -35,7 +95,9 @@ export const MagiBrainGraph = ({ status, finalStatus, analyses, decisionCode }: 
         <View className="resolve-side">
           <Text className="jp-title">解 决</Text>
           <View className="green-lines" />
-          <View className="approve-box">{GRAPH_FINAL_STATUS_TEXT[finalStatus]}</View>
+          <View className={`approve-box ${getResolveBoxClassName(analyses, finalStatus)}`}>
+            {getResolveBoxText(analyses, finalStatus)}
+          </View>
         </View>
       </View>
 
@@ -43,18 +105,17 @@ export const MagiBrainGraph = ({ status, finalStatus, analyses, decisionCode }: 
         <View className="link link-left" />
         <View className="link link-right" />
         <View className="link link-bottom" />
-        <View className={getBrainClass('balthasar', finalStatus, analyses) + ' brain-balthasar'}>
-          <Text>BALTHASAR · 2</Text>
-        </View>
-        <View className={getBrainClass('casper', finalStatus, analyses) + ' brain-casper'}>
-          <Text>CASPER · 3</Text>
-        </View>
-        <View className={getBrainClass('melchior', finalStatus, analyses) + ' brain-melchior'}>
-          <Text>MELCHIOR · 1</Text>
-        </View>
+        {analyses.map((analysis: BrainAnalysis): JSX.Element => (
+          <View
+            key={analysis.brainType}
+            className={`brain brain-${getBrainVisualState(analysis, finalStatus)} brain-${analysis.brainType}`}
+          >
+            <Text>{analysis.brainType.toUpperCase()} · {analysis.brainType === 'melchior' ? '1' : analysis.brainType === 'balthasar' ? '2' : '3'}</Text>
+          </View>
+        ))}
         <View className="magi-core">
           <Text>MAGI</Text>
-          <Text className="core-state">{status}</Text>
+          <Text className="core-state">{getCoreStateText(status, finalStatus, analyses)}</Text>
         </View>
       </View>
 
@@ -67,4 +128,20 @@ export const MagiBrainGraph = ({ status, finalStatus, analyses, decisionCode }: 
   </View>
 );
 
-export const getBrainStanceText = (analysis: BrainAnalysis): string => BRAIN_STANCE_TEXT[analysis.stance] ?? '待定';
+export const getBrainStanceText = (analysis: BrainAnalysis): string => {
+  if (analysis.status === 'pending') {
+    return '等待中';
+  }
+
+  if (analysis.status === 'running') {
+    return '分析中';
+  }
+
+  if (analysis.status === 'failed') {
+    return '不可用';
+  }
+
+  return BRAIN_STANCE_TEXT[analysis.stance] ?? '待定';
+};
+
+export const getBrainVisualClass = (analysis: BrainAnalysis, finalStatus: FinalStatus): string => getBrainVisualState(analysis, finalStatus);

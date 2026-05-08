@@ -10,8 +10,56 @@ export interface LlmMessage {
   content: string;
 }
 
+interface LlmRequestLogContext {
+  brainType: 'melchior' | 'balthasar' | 'casper' | 'core' | 'unknown';
+  attempt: number;
+  durationMs: number;
+  timeoutMs: number;
+  httpStatus: number | null;
+  errorCode: string | null;
+  model: string;
+  baseUrlHost: string;
+  responseFormatType: string | null;
+  contentPreview: string | null;
+  contentLength: number | null;
+}
+
+interface RequestLlmJsonOptions {
+  attempts?: number;
+  retryDelayBaseMs?: number;
+  onAttemptDone?: (context: LlmRequestLogContext) => void;
+  brainType?: LlmRequestLogContext['brainType'];
+}
+
 const THINK_BLOCK_RE = /<think>[\s\S]*?<\/think>/gi;
 const JSON_FENCE_RE = /```json\s*([\s\S]*?)\s*```/i;
+const CONTENT_PREVIEW_LIMIT = 200;
+
+const toContentPreview = (content: string): string => {
+  const previewSource = content.replace(THINK_BLOCK_RE, '').trim() || content;
+  const normalized = previewSource.replace(/\s+/g, ' ').trim();
+
+  if (normalized.length <= CONTENT_PREVIEW_LIMIT) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, CONTENT_PREVIEW_LIMIT)}...`;
+};
+
+const parseJsonCandidate = <T>(raw: string): T | null => {
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+};
+
+const repairJsonCandidate = (raw: string): string => raw
+  // 常见模型错误：尾逗号导致 JSON.parse 失败。
+  .replace(/,\s*([}\]])/g, '$1')
+  // 常见模型错误：中文标点混入 JSON。
+  .replace(/，/g, ',')
+  .replace(/：/g, ':');
 
 const extractFirstJsonObject = (value: string): string | null => {
   let depth = 0;
@@ -72,66 +120,140 @@ const extractFirstJsonObject = (value: string): string | null => {
 
 const parseModelJson = <T>(rawContent: string): T => {
   const withoutThink = rawContent.replace(THINK_BLOCK_RE, '').trim();
+  const fenced = withoutThink.match(JSON_FENCE_RE)?.[1]?.trim() ?? '';
+  const inlineJson = extractFirstJsonObject(withoutThink) ?? '';
+  const candidates = [withoutThink, fenced, inlineJson].filter(Boolean);
 
-  try {
-    return JSON.parse(withoutThink) as T;
-  } catch {
-    const fenced = withoutThink.match(JSON_FENCE_RE)?.[1]?.trim();
+  for (const candidate of candidates) {
+    const directParsed = parseJsonCandidate<T>(candidate);
 
-    if (fenced) {
-      return JSON.parse(fenced) as T;
+    if (directParsed !== null) {
+      return directParsed;
     }
 
-    const inlineJson = extractFirstJsonObject(withoutThink);
+    const repairedParsed = parseJsonCandidate<T>(repairJsonCandidate(candidate));
 
-    if (inlineJson) {
-      return JSON.parse(inlineJson) as T;
+    if (repairedParsed !== null) {
+      return repairedParsed;
     }
-
-    throw new Error('LLM_JSON_PARSE_FAILED');
   }
+
+  throw new Error('LLM_JSON_PARSE_FAILED');
 };
 
 export const requestLlmJson = async <T>(
   config: LlmConfig,
   messages: LlmMessage[],
   timeoutMs: number,
+  options?: RequestLlmJsonOptions,
 ): Promise<T> => {
-  // 每次 LLM 请求都有独立 AbortController，避免慢请求长期占用裁决链路。
-  const controller = new AbortController();
-  const timer = setTimeout((): void => controller.abort(), timeoutMs);
+  const maxAttempts = Math.max(1, options?.attempts ?? 2);
+  const retryDelayBaseMs = Math.max(0, options?.retryDelayBaseMs ?? 300);
+  const responseFormatType = 'json_object';
+  const baseUrlHost = (() => {
+    try {
+      return new URL(config.baseUrl).host;
+    } catch {
+      return 'invalid-url';
+    }
+  })();
 
-  try {
-    // 第一版按 OpenAI chat completions 兼容格式调用，其他 provider 需兼容该协议。
-    const response = await fetch(`${config.baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${config.apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout((): void => controller.abort(), timeoutMs);
+    const startedAt = Date.now();
+    let httpStatus: number | null = null;
+    let errorCode: string | null = null;
+
+    try {
+      // 第一版按 OpenAI chat completions 兼容格式调用，其他 provider 需兼容该协议。
+      const response = await fetch(`${config.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${config.apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: config.model,
+          messages,
+          temperature: attempt === 0 ? 0.2 : 0,
+          response_format: { type: responseFormatType },
+        }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        httpStatus = response.status;
+        throw new Error(`LLM_HTTP_${response.status}`);
+      }
+
+      const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
+      const content = data.choices?.[0]?.message?.content;
+
+      if (!content) {
+        errorCode = 'LLM_EMPTY_CONTENT';
+        throw new Error('LLM_EMPTY_CONTENT');
+      }
+
+      try {
+        const parsed = parseModelJson<T>(content);
+
+        options?.onAttemptDone?.({
+          brainType: options?.brainType ?? 'unknown',
+          attempt: attempt + 1,
+          durationMs: Date.now() - startedAt,
+          timeoutMs,
+          httpStatus,
+          errorCode: null,
+          model: config.model,
+          baseUrlHost,
+          responseFormatType,
+          contentPreview: toContentPreview(content),
+          contentLength: content.length,
+        });
+
+        return parsed;
+      } catch (error) {
+        if (error instanceof Error) {
+          errorCode = error.message;
+        }
+
+        if (!(error instanceof Error) || error.message !== 'LLM_JSON_PARSE_FAILED' || attempt === maxAttempts - 1) {
+          throw error;
+        }
+      }
+    } catch (error) {
+      if (error instanceof Error && errorCode === null) {
+        errorCode = error.name === 'AbortError' ? 'ABORT_TIMEOUT' : error.message;
+      }
+
+      options?.onAttemptDone?.({
+        brainType: options?.brainType ?? 'unknown',
+        attempt: attempt + 1,
+        durationMs: Date.now() - startedAt,
+        timeoutMs,
+        httpStatus,
+        errorCode,
         model: config.model,
-        messages,
-        temperature: 0.2,
-        response_format: { type: 'json_object' },
-      }),
-      signal: controller.signal,
-    });
+        baseUrlHost,
+        responseFormatType,
+        contentPreview: null,
+        contentLength: null,
+      });
 
-    if (!response.ok) {
-      throw new Error(`LLM_HTTP_${response.status}`);
+      if (attempt === maxAttempts - 1) {
+        throw error;
+      }
+
+      const jitterMs = Math.floor(Math.random() * 120);
+      const delayMs = retryDelayBaseMs + jitterMs;
+      await new Promise<void>((resolve): void => {
+        setTimeout((): void => resolve(), delayMs);
+      });
+    } finally {
+      clearTimeout(timer);
     }
-
-    const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
-    const content = data.choices?.[0]?.message?.content;
-
-    // 后续编排层会兜底格式错误，这里只负责拿到 JSON 字符串并解析。
-    if (!content) {
-      throw new Error('LLM_EMPTY_CONTENT');
-    }
-
-    return parseModelJson<T>(content);
-  } finally {
-    clearTimeout(timer);
   }
+
+  throw new Error('LLM_JSON_PARSE_FAILED');
 };

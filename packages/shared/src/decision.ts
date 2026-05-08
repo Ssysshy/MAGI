@@ -6,6 +6,17 @@ export type BrainType = 'melchior' | 'balthasar' | 'casper';
 
 export type BrainStance = 'approve' | 'reject' | 'defer' | 'uncertain';
 
+export type DecisionProcessingStage =
+  | 'queued'
+  | 'melchior'
+  | 'balthasar'
+  | 'casper'
+  | 'core'
+  | 'completed'
+  | 'failed';
+
+export type DecisionProcessingStatus = 'pending' | 'running' | 'completed' | 'failed';
+
 export interface DecisionVariable {
   name: string;
   value: string;
@@ -15,6 +26,7 @@ export interface DecisionVariable {
 
 export interface BrainAnalysis {
   brainType: BrainType;
+  status: DecisionProcessingStatus;
   stance: BrainStance;
   reason: string;
   focusPoints: string[];
@@ -35,6 +47,8 @@ export interface DecisionSession {
   userId: string;
   question: string;
   questionType: QuestionType;
+  processingStage: DecisionProcessingStage;
+  processingStatus: DecisionProcessingStatus;
   finalStatus: FinalStatus;
   summary: string;
   confidence: number;

@@ -16,7 +16,7 @@ export const ConsoleResolutionSection = ({ decision, analyses }: ConsoleResoluti
 
     <View className="analysis-list">
       {analyses.map((analysis: BrainAnalysis): JSX.Element => (
-        <BrainAnalysisPanel key={analysis.brainType} analysis={analysis} />
+        <BrainAnalysisPanel key={analysis.brainType} analysis={analysis} finalStatus={decision.finalStatus} />
       ))}
     </View>
   </>
