@@ -11,7 +11,7 @@ export interface LlmMessage {
 }
 
 interface LlmRequestLogContext {
-  brainType: 'melchior' | 'balthasar' | 'casper' | 'core' | 'unknown';
+  brainType: 'context' | 'melchior' | 'balthasar' | 'casper' | 'core' | 'unknown';
   attempt: number;
   durationMs: number;
   timeoutMs: number;

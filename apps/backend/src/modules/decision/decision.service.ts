@@ -6,10 +6,13 @@ import {
   analyzeWithBrain,
   analyzeWithMelchior,
   createBrainFailureResult,
+  createPendingAnalyses,
   createPendingDecision,
   createPlaceholderDecisionSummary,
   createRefusedDecision,
+  deriveDecisionContext,
   isObviousRiskQuestion,
+  mergeBrainAnalyses,
   shouldRefuseForMissingVariables,
   summarizeWithCore,
 } from './decision-orchestrator.js';
@@ -18,12 +21,40 @@ import type { LlmConfig } from './llm-client.js';
 
 const PIPELINE_FAILED_REASON = '裁决链路执行失败，主控已拒绝裁决';
 const CRITICAL_VARIABLE_MISSING_REASON = '关键变量缺失，当前无法负责地下结论';
-const BRAIN_RUNNING_REASON: Record<BrainType, string> = {
-  melchior: 'Melchior 分析中',
-  balthasar: 'Balthasar 分析中',
-  casper: 'Casper 分析中',
-};
 const OBVIOUS_RISK_REJECT_SUMMARY = '基础规则与安全风险已足够明确，本次裁决直接否决';
+const BRAIN_TYPES: BrainType[] = ['melchior', 'balthasar', 'casper'];
+
+type BrainAnalysisMap = Record<BrainType, BrainAnalysis>;
+
+const isBrainAnalysis = (value: unknown): value is BrainAnalysis => {
+  const row = value && typeof value === 'object' ? value as Partial<BrainAnalysis> : null;
+
+  return Boolean(row?.brainType && BRAIN_TYPES.includes(row.brainType));
+};
+
+const toAnalysisMap = (analyses: BrainAnalysis[]): BrainAnalysisMap => analyses.reduce(
+  (result: BrainAnalysisMap, analysis: BrainAnalysis): BrainAnalysisMap => ({
+    ...result,
+    [analysis.brainType]: analysis,
+  }),
+  {} as BrainAnalysisMap,
+);
+
+const toAnalysisList = (value: unknown): BrainAnalysis[] => {
+  if (Array.isArray(value)) {
+    return value.filter(isBrainAnalysis);
+  }
+
+  if (!value || typeof value !== 'object') {
+    return [];
+  }
+
+  const row = value as Partial<Record<BrainType, unknown>>;
+
+  return BRAIN_TYPES
+    .map((brainType: BrainType): unknown => row[brainType])
+    .filter(isBrainAnalysis);
+};
 
 const toDecisionSession = (session: {
   id: string;
@@ -50,7 +81,7 @@ const toDecisionSession = (session: {
   summary: session.summary,
   confidence: session.confidence,
   variables: session.variablesJson as DecisionSession['variables'],
-  analyses: session.analysesJson as DecisionSession['analyses'],
+  analyses: toAnalysisList(session.analysesJson),
   decisionSummary: session.summaryJson as DecisionSession['decisionSummary'],
   createdAt: session.createdAt.toISOString(),
 });
@@ -63,9 +94,22 @@ const replaceAnalysis = (
 ));
 
 const toJsonValue = (value: unknown): Prisma.InputJsonValue => value as Prisma.InputJsonValue;
+
 const hasRejectAnalysis = (analyses: BrainAnalysis[]): boolean => analyses.some(
   (analysis: BrainAnalysis): boolean => analysis.status === 'completed' && analysis.stance === 'reject',
 );
+
+const isBrainCompleted = (analysis: BrainAnalysis): boolean => analysis.status === 'completed' || analysis.status === 'failed';
+
+const toRunningAnalysis = (analysis: BrainAnalysis): BrainAnalysis => ({
+  ...analysis,
+  status: 'running',
+  reason: `${analysis.brainType.toUpperCase()} 分析中`,
+  focusPoints: ['裁决执行中'],
+  uncertainties: ['等待模型返回'],
+  unavailable: false,
+});
+
 const toBrainFailureReason = (error: unknown): string => {
   if (!(error instanceof Error)) {
     return '模型服务暂不可用，请稍后重试';
@@ -81,10 +125,8 @@ const toBrainFailureReason = (error: unknown): string => {
     return '模型服务暂不可用，请稍后重试';
   }
 
-  if (error.message === 'DECISION_SERVICE_UNAVAILABLE') {
-    if (rootError.name === 'AbortError') {
-      return '模型服务请求超时，请稍后重试';
-    }
+  if (error.message === 'DECISION_SERVICE_UNAVAILABLE' && rootError.name === 'AbortError') {
+    return '模型服务请求超时，请稍后重试';
   }
 
   if (rootError.message.startsWith('LLM_HTTP_')) {
@@ -125,24 +167,6 @@ const toBrainFailureReason = (error: unknown): string => {
   return rootError.message;
 };
 
-const markBrainRunning = (
-  analyses: BrainAnalysis[],
-  brainType: BrainType,
-): BrainAnalysis[] => analyses.map((analysis: BrainAnalysis): BrainAnalysis => {
-  if (analysis.brainType !== brainType) {
-    return analysis;
-  }
-
-  return {
-    ...analysis,
-    status: 'running',
-    reason: BRAIN_RUNNING_REASON[brainType],
-    focusPoints: ['裁决执行中'],
-    uncertainties: ['等待模型返回'],
-    unavailable: false,
-  };
-});
-
 export const createDecisionService = (prisma: PrismaClient) => {
   const aiProviderService = createAiProviderService(prisma);
 
@@ -157,6 +181,17 @@ export const createDecisionService = (prisma: PrismaClient) => {
     };
   };
 
+  const updateBrainAnalysis = async (
+    sessionId: string,
+    analysis: BrainAnalysis,
+  ): Promise<void> => {
+    await prisma.$executeRaw`
+      UPDATE DecisionSession
+      SET analysesJson = JSON_SET(analysesJson, ${`$.${analysis.brainType}`}, JSON_EXTRACT(${JSON.stringify(analysis)}, '$'))
+      WHERE id = ${sessionId}
+    `;
+  };
+
   const runDecisionPipeline = async (
     sessionId: string,
     userId: string,
@@ -167,27 +202,11 @@ export const createDecisionService = (prisma: PrismaClient) => {
 
     try {
       const config = await getLlmConfig(userId);
+      const context = await deriveDecisionContext({ question, config });
 
-      state.processingStage = 'melchior';
-      state.analyses = markBrainRunning(state.analyses, 'melchior');
-
-      await prisma.decisionSession.update({
-        where: { id: sessionId },
-        data: {
-          processingStage: state.processingStage,
-          processingStatus: state.processingStatus,
-          analysesJson: toJsonValue(state.analyses),
-        },
-      });
-
-      try {
-        const melchiorDecision = await analyzeWithMelchior({ question, config });
-        state.questionType = melchiorDecision.questionType;
-        state.variables = melchiorDecision.variables;
-        state.analyses = replaceAnalysis(state.analyses, melchiorDecision.analysis);
-      } catch (error) {
-        state.analyses = replaceAnalysis(state.analyses, createBrainFailureResult('melchior', toBrainFailureReason(error)));
-      }
+      state.questionType = context.questionType;
+      state.variables = context.variables;
+      state.analyses = createPendingAnalyses(context);
 
       if (!obviousRiskQuestion && shouldRefuseForMissingVariables(state.variables)) {
         const refusedDecision = createRefusedDecision(
@@ -201,74 +220,90 @@ export const createDecisionService = (prisma: PrismaClient) => {
         await prisma.decisionSession.update({
           where: { id: sessionId },
           data: {
-            questionType: refusedDecision.questionType,
+            questionType: state.questionType,
             processingStage: refusedDecision.processingStage,
             processingStatus: refusedDecision.processingStatus,
             finalStatus: refusedDecision.finalStatus,
             summary: refusedDecision.summary,
             confidence: refusedDecision.confidence,
             variablesJson: toJsonValue(refusedDecision.variables),
-            analysesJson: toJsonValue(refusedDecision.analyses),
-            summaryJson: toJsonValue(refusedDecision.decisionSummary),
+            analysesJson: toJsonValue(toAnalysisMap(refusedDecision.analyses)),
+            summaryJson: toJsonValue({
+              ...refusedDecision.decisionSummary,
+              missingInformation: [...new Set([
+                ...refusedDecision.decisionSummary.missingInformation,
+                ...context.missingInformation,
+              ])],
+            }),
           },
         });
 
         return;
       }
 
-      state.processingStage = 'balthasar';
-      state.analyses = markBrainRunning(state.analyses, 'balthasar');
+      state.processingStage = 'brains';
+      state.processingStatus = 'running';
+      state.analyses = state.analyses.map(toRunningAnalysis);
 
       await prisma.decisionSession.update({
         where: { id: sessionId },
         data: {
           questionType: state.questionType,
           processingStage: state.processingStage,
+          processingStatus: state.processingStatus,
           variablesJson: toJsonValue(state.variables),
-          analysesJson: toJsonValue(state.analyses),
+          analysesJson: toJsonValue(toAnalysisMap(state.analyses)),
         },
       });
 
-      try {
-        state.analyses = replaceAnalysis(state.analyses, await analyzeWithBrain('balthasar', {
-          question,
-          questionType: state.questionType,
-          variables: state.variables,
-          config,
-        }));
-      } catch (error) {
-        state.analyses = replaceAnalysis(state.analyses, createBrainFailureResult('balthasar', toBrainFailureReason(error)));
+      const runBrain = async (brainType: BrainType): Promise<void> => {
+        let nextAnalysis: BrainAnalysis;
+
+        try {
+          nextAnalysis = brainType === 'melchior'
+            ? await analyzeWithMelchior({
+              question,
+              questionType: state.questionType,
+              variables: state.variables,
+              config,
+            })
+            : await analyzeWithBrain(brainType as Exclude<BrainType, 'melchior'>, {
+              question,
+              questionType: state.questionType,
+              variables: state.variables,
+              config,
+            });
+        } catch (error) {
+          nextAnalysis = createBrainFailureResult(brainType, toBrainFailureReason(error), {
+            questionType: state.questionType,
+            variables: state.variables,
+          });
+        }
+
+        state.analyses = replaceAnalysis(state.analyses, nextAnalysis);
+        await updateBrainAnalysis(sessionId, nextAnalysis);
+      };
+
+      await Promise.all([
+        runBrain('melchior'),
+        runBrain('balthasar'),
+        runBrain('casper'),
+      ]);
+
+      if (!state.analyses.every(isBrainCompleted)) {
+        throw new Error('BRAIN_PIPELINE_INCOMPLETE');
       }
 
-      state.processingStage = 'casper';
-      state.analyses = markBrainRunning(state.analyses, 'casper');
-
-      await prisma.decisionSession.update({
-        where: { id: sessionId },
-        data: {
-          processingStage: state.processingStage,
-          analysesJson: toJsonValue(state.analyses),
-        },
-      });
-
-      try {
-        state.analyses = replaceAnalysis(state.analyses, await analyzeWithBrain('casper', {
-          question,
-          questionType: state.questionType,
-          variables: state.variables,
-          config,
-        }));
-      } catch (error) {
-        state.analyses = replaceAnalysis(state.analyses, createBrainFailureResult('casper', toBrainFailureReason(error)));
-      }
-
+      const merged = mergeBrainAnalyses(state.analyses);
       state.processingStage = 'core';
 
       await prisma.decisionSession.update({
         where: { id: sessionId },
         data: {
+          questionType: state.questionType,
+          variablesJson: toJsonValue(state.variables),
           processingStage: state.processingStage,
-          analysesJson: toJsonValue(state.analyses),
+          analysesJson: toJsonValue(toAnalysisMap(state.analyses)),
         },
       });
 
@@ -285,12 +320,23 @@ export const createDecisionService = (prisma: PrismaClient) => {
       const confidence = forceReject ? Math.max(coreDecision.confidence, 0.82) : coreDecision.confidence;
       const decisionSummary = forceReject
         ? {
-            ...coreDecision.decisionSummary,
-            rule: '公共规则明确或基础安全风险明确时，优先直接否决',
-            majorityOpinion: '至少一个裁决角色已明确否决，且问题属于明显高风险/违法场景',
-            finalDecision: 'REJECTED - 基础规则与安全风险已足够明确，本次裁决直接否决。',
-          }
-        : coreDecision.decisionSummary;
+          ...coreDecision.decisionSummary,
+          rule: '公共规则明确或基础安全风险明确时，优先直接否决',
+          majorityOpinion: '至少一个裁决角色已明确否决，且问题属于明显高风险/违法场景',
+          missingInformation: [...new Set([
+            ...context.missingInformation,
+            ...merged.missingInformation,
+          ])],
+          finalDecision: 'REJECTED - 基础规则与安全风险已足够明确，本次裁决直接否决。',
+        }
+        : {
+          ...coreDecision.decisionSummary,
+          missingInformation: [...new Set([
+            ...context.missingInformation,
+            ...coreDecision.decisionSummary.missingInformation,
+            ...merged.missingInformation,
+          ])],
+        };
 
       await prisma.decisionSession.update({
         where: { id: sessionId },
@@ -302,7 +348,7 @@ export const createDecisionService = (prisma: PrismaClient) => {
           summary,
           confidence,
           variablesJson: toJsonValue(state.variables),
-          analysesJson: toJsonValue(state.analyses),
+          analysesJson: toJsonValue(toAnalysisMap(state.analyses)),
           summaryJson: toJsonValue(decisionSummary),
         },
       });
@@ -324,7 +370,7 @@ export const createDecisionService = (prisma: PrismaClient) => {
           summary: PIPELINE_FAILED_REASON,
           confidence: 0,
           variablesJson: toJsonValue(state.variables),
-          analysesJson: toJsonValue(state.analyses),
+          analysesJson: toJsonValue(toAnalysisMap(state.analyses)),
           summaryJson: toJsonValue(createPlaceholderDecisionSummary(PIPELINE_FAILED_REASON)),
         },
       });
@@ -345,7 +391,7 @@ export const createDecisionService = (prisma: PrismaClient) => {
           summary: draft.summary,
           confidence: draft.confidence,
           variablesJson: toJsonValue(draft.variables),
-          analysesJson: toJsonValue(draft.analyses),
+          analysesJson: toJsonValue(toAnalysisMap(draft.analyses)),
           summaryJson: toJsonValue(draft.decisionSummary),
         },
       });

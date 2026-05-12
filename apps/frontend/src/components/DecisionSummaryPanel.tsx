@@ -17,9 +17,7 @@ export const DecisionSummaryPanel = ({ decision }: DecisionSummaryPanelProps): J
   }
 
   if (
-    decision.processingStage === 'melchior'
-    || decision.processingStage === 'balthasar'
-    || decision.processingStage === 'casper'
+    decision.processingStage === 'brains'
     || decision.processingStage === 'core'
   ) {
     return (

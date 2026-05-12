@@ -8,9 +8,7 @@ export type BrainStance = 'approve' | 'reject' | 'defer' | 'uncertain';
 
 export type DecisionProcessingStage =
   | 'queued'
-  | 'melchior'
-  | 'balthasar'
-  | 'casper'
+  | 'brains'
   | 'core'
   | 'completed'
   | 'failed';
@@ -26,6 +24,8 @@ export interface DecisionVariable {
 
 export interface BrainAnalysis {
   brainType: BrainType;
+  questionType: QuestionType;
+  variables: DecisionVariable[];
   status: DecisionProcessingStatus;
   stance: BrainStance;
   reason: string;

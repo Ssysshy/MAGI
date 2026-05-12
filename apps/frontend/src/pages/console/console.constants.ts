@@ -54,6 +54,8 @@ export const BRAIN_ANALYSIS_META: Record<BrainType, BrainAnalysisMeta> = {
 export const DEFAULT_ANALYSES: BrainAnalysis[] = [
   {
     brainType: 'melchior',
+    questionType: 'strategy',
+    variables: [],
     status: 'pending',
     stance: 'uncertain',
     reason: '等待 Melchior 接入',
@@ -62,6 +64,8 @@ export const DEFAULT_ANALYSES: BrainAnalysis[] = [
   },
   {
     brainType: 'balthasar',
+    questionType: 'strategy',
+    variables: [],
     status: 'pending',
     stance: 'uncertain',
     reason: '等待 Balthasar 接入',
@@ -70,6 +74,8 @@ export const DEFAULT_ANALYSES: BrainAnalysis[] = [
   },
   {
     brainType: 'casper',
+    questionType: 'strategy',
+    variables: [],
     status: 'pending',
     stance: 'uncertain',
     reason: '等待 Casper 接入',

@@ -20,9 +20,7 @@ const getConsoleStatus = (decision: DecisionSession): ConsoleStatus => {
   }
 
   if (
-    decision.processingStage === 'melchior'
-    || decision.processingStage === 'balthasar'
-    || decision.processingStage === 'casper'
+    decision.processingStage === 'brains'
     || decision.processingStage === 'core'
   ) {
     return 'ANALYZING';

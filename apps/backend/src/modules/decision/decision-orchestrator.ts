@@ -41,6 +41,12 @@ const coreDecisionSchema = z.object({
 type DecisionDraft = Omit<DecisionSession, 'id' | 'createdAt'>;
 type AppError = Error & { statusCode: number };
 
+export interface DecisionContext {
+  questionType: QuestionType;
+  variables: DecisionVariable[];
+  missingInformation: string[];
+}
+
 const BRAIN_TYPES: BrainType[] = ['melchior', 'balthasar', 'casper'];
 const BRAIN_ROLES: Record<BrainType, string> = {
   melchior: '科学家（逻辑、效率、条件完备性）',
@@ -521,8 +527,11 @@ const normalizeBrainAnalysis = (
   brainType: BrainType,
   value: unknown,
   status: BrainAnalysis['status'],
+  context?: Pick<DecisionContext, 'questionType' | 'variables'>,
 ): BrainAnalysis => {
   const row = toRecord(value);
+  const questionType = context?.questionType ?? resolveQuestionType(row.questionType).questionType;
+  const variables = context?.variables ?? toVariables(row.variables);
   const stanceRaw = toText(row.stance);
   const reason = toText(row.reason) || toText(row.analysis) || '信息不足';
   const focusPoints = toStringArray(row.focusPoints);
@@ -533,6 +542,8 @@ const normalizeBrainAnalysis = (
 
   return {
     brainType,
+    questionType,
+    variables,
     status,
     stance,
     reason,
@@ -571,8 +582,13 @@ const enrichBrainAnalysis = (
   };
 };
 
-const createPendingAnalysis = (brainType: BrainType): BrainAnalysis => ({
+const createPendingAnalysis = (
+  brainType: BrainType,
+  context?: Pick<DecisionContext, 'questionType' | 'variables'>,
+): BrainAnalysis => ({
   brainType,
+  questionType: context?.questionType ?? 'strategy',
+  variables: context?.variables ?? [],
   status: 'pending',
   stance: 'uncertain',
   reason: `等待 ${brainType.toUpperCase()} 接入`,
@@ -581,8 +597,14 @@ const createPendingAnalysis = (brainType: BrainType): BrainAnalysis => ({
   unavailable: false,
 });
 
-const createFailedAnalysis = (brainType: BrainType, reason: string): BrainAnalysis => ({
+const createFailedAnalysis = (
+  brainType: BrainType,
+  reason: string,
+  context?: Pick<DecisionContext, 'questionType' | 'variables'>,
+): BrainAnalysis => ({
   brainType,
+  questionType: context?.questionType ?? 'strategy',
+  variables: context?.variables ?? [],
   status: 'failed',
   stance: 'uncertain',
   reason,
@@ -591,7 +613,9 @@ const createFailedAnalysis = (brainType: BrainType, reason: string): BrainAnalys
   unavailable: true,
 });
 
-export const createPendingAnalyses = (): BrainAnalysis[] => BRAIN_TYPES.map((brainType) => createPendingAnalysis(brainType));
+export const createPendingAnalyses = (
+  context?: Pick<DecisionContext, 'questionType' | 'variables'>,
+): BrainAnalysis[] => BRAIN_TYPES.map((brainType) => createPendingAnalysis(brainType, context));
 
 export const createPlaceholderDecisionSummary = (summary: string): DecisionSummary => ({
   rule: '等待主控汇总',
@@ -672,7 +696,7 @@ const isLlmServiceError = (error: unknown): boolean => {
 const requestDecisionJson = async <T>(
   config: LlmConfig,
   messages: Array<{ role: 'system' | 'user'; content: string }>,
-  options?: { brainType?: 'melchior' | 'balthasar' | 'casper' | 'core'; timeoutMs?: number },
+  options?: { brainType?: 'context' | 'melchior' | 'balthasar' | 'casper' | 'core'; timeoutMs?: number },
 ): Promise<T> => {
   let lastError: unknown;
   const timeoutMs = options?.timeoutMs ?? DECISION_LLM_TIMEOUT_MS;
@@ -728,56 +752,65 @@ interface BrainDecisionInput {
   config: LlmConfig;
 }
 
-interface MelchiorDecision {
-  questionType: QuestionType;
-  variables: DecisionVariable[];
-  analysis: BrainAnalysis;
-}
-
 type MelchiorMode = 'strict' | 'relaxed';
 
-const buildMelchiorDecision = (
-  question: string,
-  result: unknown,
-  mode: MelchiorMode,
-): MelchiorDecision => {
+const normalizeDecisionContext = (question: string, result: unknown): DecisionContext => {
   const row = toRecord(result);
   const fallbackVariables = getDefaultVariablesForQuestion(question);
-  const variables = toVariables(row.variables);
   const questionTypeResult = resolveQuestionType(row.questionType);
-  const normalizedAnalysisInput = normalizeAnalysisInput(row.analysis);
+  const variables = toVariables(row.variables);
+  const finalVariables = variables.length > 0 ? variables : fallbackVariables;
+  const missingInformation = mergeUniqueTexts(
+    toStringArray(row.missingInformation),
+    finalVariables
+      .filter((item: DecisionVariable): boolean => item.isMissing)
+      .map((item: DecisionVariable): string => item.name),
+  );
   const issues: string[] = [];
 
   if (questionTypeResult.degraded) {
     issues.push('questionType 非法，已回退为 strategy');
   }
 
-  if (!Array.isArray(row.variables)) {
+  if (!Array.isArray(row.variables) || variables.length === 0) {
     issues.push(
       fallbackVariables.length > 0
-        ? 'variables 缺失，已使用默认变量'
-        : 'variables 缺失，当前无可用默认变量',
-    );
-  } else if (variables.length === 0) {
-    issues.push(
-      fallbackVariables.length > 0
-        ? 'variables 无有效项，已使用默认变量'
-        : 'variables 无有效项，当前无可用默认变量',
+        ? 'variables 缺失或无有效项，已使用默认变量'
+        : 'variables 缺失或无有效项，已回退为空数组',
     );
   }
 
-  issues.push(...normalizedAnalysisInput.issues);
   logPartialSchema('melchior', issues, result, {
     rawQuestionType: questionTypeResult.raw,
+  });
+
+  return {
+    questionType: questionTypeResult.questionType,
+    variables: finalVariables,
+    missingInformation,
+  };
+};
+
+const buildBrainAnalysis = (
+  brainType: BrainType,
+  result: unknown,
+  context: Pick<DecisionContext, 'questionType' | 'variables'>,
+  options?: { allowRuleDegrade?: boolean },
+): BrainAnalysis => {
+  const normalizedAnalysisInput = normalizeAnalysisInput(result);
+  const issues = [...normalizedAnalysisInput.issues];
+
+  logPartialSchema(brainType, issues, result, {
     analysisValueType: normalizedAnalysisInput.valueType,
     analysisPreview: normalizedAnalysisInput.preview,
   });
 
-  const normalizedAnalysis = normalizeBrainAnalysis('melchior', normalizedAnalysisInput.normalized, 'completed');
-  const finalVariables = variables.length > 0 ? variables : fallbackVariables;
-  const finalAnalysisBase = mode === 'relaxed' && !normalizedAnalysisInput.hasSignal && finalVariables.length > 0
+  const normalizedAnalysis = normalizeBrainAnalysis(brainType, normalizedAnalysisInput.normalized, 'completed', context);
+  const finalAnalysisBase = options?.allowRuleDegrade && !normalizedAnalysisInput.hasSignal && context.variables.length > 0
     ? {
-        brainType: 'melchior' as const,
+        brainType,
+        questionType: context.questionType,
+        variables: context.variables,
         status: 'completed' as const,
         stance: 'reject' as const,
         reason: '模型返回结构不完整，已按规则直判降级处理',
@@ -786,37 +819,15 @@ const buildMelchiorDecision = (
         unavailable: false,
       }
     : normalizedAnalysis;
-  const finalAnalysis = enrichBrainAnalysis('melchior', finalAnalysisBase, issues, {
-    includeRuleDegrade: mode === 'relaxed',
+  const finalAnalysis = enrichBrainAnalysis(brainType, finalAnalysisBase, issues, {
+    includeRuleDegrade: options?.allowRuleDegrade,
   });
 
-  if (!normalizedAnalysisInput.hasSignal && (mode === 'strict' || finalVariables.length === 0)) {
+  if (!normalizedAnalysisInput.hasSignal && (!options?.allowRuleDegrade || context.variables.length === 0)) {
     throw new Error('LLM_SCHEMA_PARTIAL_INVALID');
   }
 
-  return {
-    questionType: questionTypeResult.questionType,
-    variables: finalVariables,
-    analysis: finalAnalysis,
-  };
-};
-
-const buildBrainAnalysis = (
-  brainType: Exclude<BrainType, 'melchior'>,
-  result: unknown,
-): BrainAnalysis => {
-  const normalizedAnalysisInput = normalizeAnalysisInput(result);
-
-  logPartialSchema(brainType, normalizedAnalysisInput.issues, result, {
-    analysisValueType: normalizedAnalysisInput.valueType,
-    analysisPreview: normalizedAnalysisInput.preview,
-  });
-
-  return enrichBrainAnalysis(
-    brainType,
-    normalizeBrainAnalysis(brainType, normalizedAnalysisInput.normalized, 'completed'),
-    normalizedAnalysisInput.issues,
-  );
+  return finalAnalysis;
 };
 
 const getLlmHttpStatus = (error: unknown): number | null => {
@@ -853,9 +864,46 @@ export const classifyMelchiorMode = (question: string): MelchiorMode => (
   isObviousRiskQuestion(question) ? 'relaxed' : 'strict'
 );
 
-export const analyzeWithMelchior = async (
+export const deriveDecisionContext = async (
   input: Pick<BrainDecisionInput, 'question' | 'config'>,
-): Promise<MelchiorDecision> => decisionLimit(async (): Promise<MelchiorDecision> => {
+): Promise<DecisionContext> => decisionLimit(async (): Promise<DecisionContext> => {
+  try {
+    const result = await requestDecisionJson<unknown>(input.config, [
+      {
+        role: 'system',
+        content: [
+          '你是 Magi 的问题识别单元，只负责统一裁决上下文。',
+          '必须返回严格 JSON，不要 Markdown。',
+          '字段必须包含 questionType、variables、missingInformation。',
+          'questionType 只能是 boolean、multiple_choice、priority、strategy、diagnosis。',
+          'variables 每项包含 name、value、isMissing、isCritical。',
+          'missingInformation 只列出会影响裁决质量的缺失信息。',
+          '如果问题属于公共规则或基础安全判断，可以直接返回通用默认变量，不允许为了边缘情境把常识变量标记为关键缺失。',
+          '只有当某变量缺失会直接阻断裁决，且没有合理默认假设可以替代时，才允许标记 isCritical=true。',
+        ].join('\n'),
+      },
+      {
+        role: 'user',
+        content: JSON.stringify({ question: input.question }),
+      },
+    ], {
+      brainType: 'context',
+      timeoutMs: MELCHIOR_LLM_TIMEOUT_MS,
+    });
+
+    return normalizeDecisionContext(input.question, result);
+  } catch (error) {
+    if (isLlmServiceError(error)) {
+      throw createDecisionUnavailableError(error);
+    }
+
+    throw error;
+  }
+});
+
+export const analyzeWithMelchior = async (
+  input: BrainDecisionInput,
+): Promise<BrainAnalysis> => decisionLimit(async (): Promise<BrainAnalysis> => {
   const mode = classifyMelchiorMode(input.question);
 
   try {
@@ -865,25 +913,29 @@ export const analyzeWithMelchior = async (
         content: [
           '你是 Magi 的 Melchior，只负责逻辑、效率和条件完备性判断。',
           '必须返回严格 JSON，不要 Markdown。',
-          '字段必须包含 questionType、variables、analysis。',
-          'variables 每项包含 name、value、isMissing、isCritical。',
-          '必须返回至少 1 个变量；如果问题属于公共规则或基础安全判断，可以直接返回通用默认变量，不允许返回空数组。',
-          '要明确区分：未知变量 != 无法判断；如果仅缺边缘情境，不要因此返回空变量数组。',
-          '只有当某变量缺失会直接阻断裁决，且没有任何合理默认假设可以替代时，才允许标记 isCritical=true。',
-          '不要为了求稳把常见补充信息一律标成关键缺失；能在常识范围内继续判断时，isCritical 必须是 false。',
-          '除非问题本身完全无法判定，否则 critical 缺失项应控制在极少数。',
-          'analysis 仅描述 Melchior 的独立判断，不要替另外两个角色下结论。',
+          '字段必须包含 stance、reason、focusPoints、uncertainties。',
+          '只能基于输入里的统一 questionType 和 variables 分析，不要重新定义题型或变量。',
+          '只输出当前角色的独立判断，不要汇总最终裁决。',
         ].join('\n'),
       },
       {
         role: 'user',
-        content: JSON.stringify({ question: input.question }),
+        content: JSON.stringify({
+          question: input.question,
+          questionType: input.questionType,
+          variables: input.variables,
+        }),
       },
     ], {
       brainType: 'melchior',
       timeoutMs: MELCHIOR_LLM_TIMEOUT_MS,
     });
-    return buildMelchiorDecision(input.question, result, mode);
+    return buildBrainAnalysis('melchior', result, {
+      questionType: input.questionType,
+      variables: input.variables,
+    }, {
+      allowRuleDegrade: mode === 'relaxed',
+    });
   } catch (error) {
     if (isLlmServiceError(error)) {
       throw createDecisionUnavailableError(error);
@@ -905,6 +957,7 @@ export const analyzeWithBrain = async (
           `你是 Magi 的 ${brainType.toUpperCase()}，职责是 ${BRAIN_ROLES[brainType]}。`,
           '必须返回严格 JSON，不要 Markdown。',
           '字段必须包含 stance、reason、focusPoints、uncertainties。',
+          '只能基于输入里的统一 questionType 和 variables 分析，不要重新定义题型或变量。',
           '如果你的理由已经明确支持或反对，stance 必须同步返回 approve 或 reject，不要保守地返回 uncertain。',
           '只输出当前角色的独立判断，不要汇总最终裁决。',
         ].join('\n'),
@@ -922,7 +975,10 @@ export const analyzeWithBrain = async (
       timeoutMs: DECISION_LLM_TIMEOUT_MS,
     });
 
-    return buildBrainAnalysis(brainType, result);
+    return buildBrainAnalysis(brainType, result, {
+      questionType: input.questionType,
+      variables: input.variables,
+    });
   } catch (error) {
     if (isLlmServiceError(error)) {
       throw createDecisionUnavailableError(error);
@@ -1025,4 +1081,28 @@ export const shouldRefuseForMissingVariables = (variables: DecisionVariable[]): 
 
 export const isObviousRiskQuestion = (question: string): boolean => OBVIOUS_RISK_QUESTION_RE.test(question);
 
-export const createBrainFailureResult = (brainType: BrainType, reason: string): BrainAnalysis => createFailedAnalysis(brainType, reason);
+export const createBrainFailureResult = (
+  brainType: BrainType,
+  reason: string,
+  context?: Pick<DecisionContext, 'questionType' | 'variables'>,
+): BrainAnalysis => createFailedAnalysis(brainType, reason, context);
+
+export const mergeBrainAnalyses = (
+  analyses: BrainAnalysis[],
+): { missingInformation: string[] } => {
+  const missingInformation: string[] = [];
+
+  for (const analysis of analyses) {
+    if (analysis.status === 'failed') {
+      missingInformation.push(`${analysis.brainType.toUpperCase()} 不可用`);
+    }
+
+    if (analysis.stance === 'uncertain') {
+      missingInformation.push(...analysis.uncertainties);
+    }
+  }
+
+  return {
+    missingInformation: mergeUniqueTexts(missingInformation),
+  };
+};
