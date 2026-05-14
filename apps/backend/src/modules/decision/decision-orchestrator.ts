@@ -625,6 +625,14 @@ export const createPlaceholderDecisionSummary = (summary: string): DecisionSumma
   finalDecision: summary,
 });
 
+export const createFailedDecisionSummary = (reason: string, stage: string): DecisionSummary => ({
+  rule: '裁决链路失败',
+  majorityOpinion: '本次未形成有效多数意见（阶段失败）',
+  minorityOpinion: '无',
+  missingInformation: [stage],
+  finalDecision: reason,
+});
+
 export const createPendingDecision = (
   userId: string,
   question: string,

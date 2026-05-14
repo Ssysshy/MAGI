@@ -6,9 +6,9 @@ import {
   analyzeWithBrain,
   analyzeWithMelchior,
   createBrainFailureResult,
+  createFailedDecisionSummary,
   createPendingAnalyses,
   createPendingDecision,
-  createPlaceholderDecisionSummary,
   createRefusedDecision,
   deriveDecisionContext,
   isObviousRiskQuestion,
@@ -23,6 +23,18 @@ const PIPELINE_FAILED_REASON = '裁决链路执行失败，主控已拒绝裁决
 const CRITICAL_VARIABLE_MISSING_REASON = '关键变量缺失，当前无法负责地下结论';
 const OBVIOUS_RISK_REJECT_SUMMARY = '基础规则与安全风险已足够明确，本次裁决直接否决';
 const BRAIN_TYPES: BrainType[] = ['melchior', 'balthasar', 'casper'];
+type PipelineStageCode = 'PIPELINE_STAGE_CONTEXT' | 'PIPELINE_STAGE_BRAINS' | 'PIPELINE_STAGE_CORE' | 'PIPELINE_STAGE_UNKNOWN';
+type PipelineReasonCode =
+  | 'PIPELINE_TIMEOUT'
+  | 'PIPELINE_AUTH_FAILED'
+  | 'PIPELINE_RATE_LIMITED'
+  | 'PIPELINE_PROVIDER_UNAVAILABLE'
+  | 'PIPELINE_PROVIDER_BAD_RESPONSE'
+  | 'PIPELINE_SCHEMA_PARTIAL_INVALID'
+  | 'PIPELINE_JSON_PARSE_FAILED'
+  | 'PIPELINE_EMPTY_CONTENT'
+  | 'PIPELINE_ABORTED'
+  | 'PIPELINE_UNKNOWN';
 
 type BrainAnalysisMap = Record<BrainType, BrainAnalysis>;
 
@@ -165,6 +177,102 @@ const toBrainFailureReason = (error: unknown): string => {
   }
 
   return rootError.message;
+};
+
+const toPipelineStageCode = (stage: string): PipelineStageCode => {
+  if (stage === 'queued') {
+    return 'PIPELINE_STAGE_CONTEXT';
+  }
+
+  if (stage === 'brains') {
+    return 'PIPELINE_STAGE_BRAINS';
+  }
+
+  if (stage === 'core') {
+    return 'PIPELINE_STAGE_CORE';
+  }
+
+  return 'PIPELINE_STAGE_UNKNOWN';
+};
+
+const resolveRootError = (error: unknown): Error | null => {
+  if (!(error instanceof Error)) {
+    return null;
+  }
+
+  if (error.message !== 'DECISION_SERVICE_UNAVAILABLE') {
+    return error;
+  }
+
+  return (error as Error & { cause?: unknown }).cause instanceof Error
+    ? (error as Error & { cause: Error }).cause
+    : error;
+};
+
+const toLlmHttpStatus = (error: unknown): number | null => {
+  const rootError = resolveRootError(error);
+
+  if (!rootError) {
+    return null;
+  }
+
+  const matched = rootError.message.match(/^LLM_HTTP_(\d{3})$/);
+
+  if (!matched) {
+    return null;
+  }
+
+  const status = Number.parseInt(matched[1], 10);
+
+  return Number.isNaN(status) ? null : status;
+};
+
+const toPipelineReasonCode = (error: unknown): PipelineReasonCode => {
+  const rootError = resolveRootError(error);
+
+  if (!rootError) {
+    return 'PIPELINE_UNKNOWN';
+  }
+
+  if (rootError.name === 'AbortError') {
+    return 'PIPELINE_TIMEOUT';
+  }
+
+  const status = toLlmHttpStatus(rootError);
+
+  if (status === 401 || status === 403) {
+    return 'PIPELINE_AUTH_FAILED';
+  }
+
+  if (status === 429) {
+    return 'PIPELINE_RATE_LIMITED';
+  }
+
+  if (typeof status === 'number' && status >= 500) {
+    return 'PIPELINE_PROVIDER_UNAVAILABLE';
+  }
+
+  if (typeof status === 'number') {
+    return 'PIPELINE_PROVIDER_BAD_RESPONSE';
+  }
+
+  if (rootError.message === 'LLM_SCHEMA_PARTIAL_INVALID') {
+    return 'PIPELINE_SCHEMA_PARTIAL_INVALID';
+  }
+
+  if (rootError.message === 'LLM_JSON_PARSE_FAILED') {
+    return 'PIPELINE_JSON_PARSE_FAILED';
+  }
+
+  if (rootError.message === 'LLM_EMPTY_CONTENT') {
+    return 'PIPELINE_EMPTY_CONTENT';
+  }
+
+  if (rootError.name === 'AbortError') {
+    return 'PIPELINE_ABORTED';
+  }
+
+  return 'PIPELINE_UNKNOWN';
 };
 
 export const createDecisionService = (prisma: PrismaClient) => {
@@ -353,10 +461,23 @@ export const createDecisionService = (prisma: PrismaClient) => {
         },
       });
     } catch (error) {
+      const normalizedReason = toBrainFailureReason(error);
+      const failedAtStage = toPipelineStageCode(state.processingStage);
+      const normalizedReasonCode = toPipelineReasonCode(error);
+      const llmHttpStatus = toLlmHttpStatus(error);
+      const failedSummary = createFailedDecisionSummary(normalizedReason, failedAtStage);
+      failedSummary.missingInformation = [...new Set([
+        ...failedSummary.missingInformation,
+        normalizedReasonCode,
+      ])];
+
       console.error('[decision.pipeline.failed]', {
         sessionId,
         userId,
         processingStage: state.processingStage,
+        failedAtStage,
+        normalizedReasonCode,
+        llmHttpStatus,
         errorName: error instanceof Error ? error.name : 'UnknownError',
         errorMessage: error instanceof Error ? error.message : String(error),
       });
@@ -371,7 +492,7 @@ export const createDecisionService = (prisma: PrismaClient) => {
           confidence: 0,
           variablesJson: toJsonValue(state.variables),
           analysesJson: toJsonValue(toAnalysisMap(state.analyses)),
-          summaryJson: toJsonValue(createPlaceholderDecisionSummary(PIPELINE_FAILED_REASON)),
+          summaryJson: toJsonValue(failedSummary),
         },
       });
     }

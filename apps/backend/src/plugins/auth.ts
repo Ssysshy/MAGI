@@ -1,6 +1,6 @@
 import fp from 'fastify-plugin';
 import jwt, { type JwtPayload } from 'jsonwebtoken';
-import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
+import type { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify';
 import { env } from '../config/env.js';
 
 interface SessionPayload extends JwtPayload {
@@ -13,7 +13,7 @@ declare module 'fastify' {
   }
 
   interface FastifyInstance {
-    authenticate: (request: FastifyRequest) => Promise<void>;
+    authenticate: (request: FastifyRequest, reply: FastifyReply) => Promise<void>;
   }
 }
 
@@ -30,7 +30,7 @@ const isSessionPayload = (payload: string | JwtPayload): payload is SessionPaylo
 );
 
 const authPlugin: FastifyPluginAsync = async (app) => {
-  app.decorate('authenticate', async (request: FastifyRequest): Promise<void> => {
+  app.decorate('authenticate', async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
     // 所有受保护接口都从 HttpOnly Cookie 读取会话，避免前端直接持有 token。
     const token = request.cookies.magi_session;
 
@@ -47,6 +47,15 @@ const authPlugin: FastifyPluginAsync = async (app) => {
       }
 
       request.userId = payload.userId;
+
+      const user = await app.prisma.user.findUnique({
+        where: { id: payload.userId },
+        select: { id: true },
+      });
+      if (!user) {
+        reply.clearCookie('magi_session', { path: '/' });
+        throw createUnauthorizedError();
+      }
     } catch {
       throw createUnauthorizedError();
     }
