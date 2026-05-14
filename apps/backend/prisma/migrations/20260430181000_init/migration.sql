@@ -29,6 +29,8 @@ CREATE TABLE `DecisionSession` (
   `userId` VARCHAR(191) NOT NULL,
   `question` TEXT NOT NULL,
   `questionType` VARCHAR(191) NOT NULL,
+  `processingStage` VARCHAR(191) NOT NULL,
+  `processingStatus` VARCHAR(191) NOT NULL,
   `finalStatus` VARCHAR(191) NOT NULL,
   `summary` TEXT NOT NULL,
   `confidence` DOUBLE NOT NULL,

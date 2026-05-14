@@ -162,8 +162,9 @@
 
 当前实现补充：
 
-- `POST /api/decision-sessions` 先创建 `queued/running` 的会话快照并立即返回，后端异步推进 `melchior -> balthasar -> casper -> core -> completed/failed`。
-- 三脑执行并非并行 fan-out，而是按阶段顺序推进；每一阶段会把对应脑状态更新为 `running`。
+- `POST /api/decision-sessions` 先创建 `queued/running` 的会话快照并立即返回，后端异步推进 `context -> brains -> core -> completed/failed`。
+- 当前代码的处理阶段为 `queued -> brains -> core -> completed/failed`；三脑在 `brains` 阶段统一置为 `running` 后通过 `Promise.all` 并行执行，不再按单脑阶段串行推进。
+- 单个大脑异常会被写成该脑 `status: failed`，链路继续进入 `Magi Core`；链路级异常才落入 `processingStage: failed`。
 - `Melchior` 与 `Core` 已采用字段级归一化，允许“可解析 JSON 但字段不标准”时继续裁决；仅在关键信号不可用时失败。
 
 ### 5.3 裁决规则
@@ -226,7 +227,7 @@
 
 ## 8. 技术架构
 
-第一版采用前后端分离的 monorepo 架构，并通过 Docker 统一本地运行环境。
+第一版采用前后端分离的 monorepo 架构。当前代码同时保留 Docker 编排与本地 pnpm 开发脚本；本地开发不强制依赖 Docker。
 
 ```txt
 magi-console/
@@ -303,10 +304,17 @@ backend
 mysql
 ```
 
-MySQL 连接由后端环境变量提供：
+Docker MySQL 连接由后端环境变量提供：
 
 ```txt
 DATABASE_URL="mysql://user:password@mysql:3306/magi_console"
+```
+
+当前本地开发环境使用后端 `.env` 中的本机 MySQL 连接：
+
+```txt
+DATABASE_URL="mysql://root:qwer1234@localhost:3306/magi?charset=utf8mb4"
+FRONTEND_ORIGIN="http://localhost:10086"
 ```
 
 ### 8.4 后端模块
@@ -392,10 +400,10 @@ p-limit: 单实例裁决并发 5
 
 限流分两层：
 
-- 接口层：限制单个 IP 和单个用户的请求频率
+- 接口层：当前使用 `@fastify/rate-limit` 全局限制 `120/minute`，未单独实现用户维度限流
 - LLM 层：限制单位时间内的 LLM 请求数
 
-接口层使用 `@fastify/rate-limit`，LLM 层使用 `Bottleneck`。
+接口层使用 `@fastify/rate-limit`，LLM 层使用 `Bottleneck`，当前配置为 `maxConcurrent: 3`、`minTime: 500ms`。
 
 ### 10.3 超时控制
 
@@ -421,7 +429,7 @@ p-limit: 单实例裁决并发 5
 - 每次请求记录 `responseFormatType/contentPreview/contentLength`
 - 字段级降级日志使用 `LLM_SCHEMA_PARTIAL_INVALID`
 
-第一版使用同步接口，不引入队列。若后续裁决任务经常超过 `60s`，再引入 `Redis + BullMQ`。
+当前实现使用“先创建会话、后台异步执行、前端轮询详情”的接口形态，但未引入外部队列。若后续裁决任务经常超过 `60s`，再引入 `Redis + BullMQ`。
 
 ## 11. 数据结构
 
@@ -493,6 +501,8 @@ p-limit: 单实例裁决并发 5
 字段：
 
 - `brainType`
+- `questionType`
+- `variables`
 - `status`
 - `stance`
 - `reason`

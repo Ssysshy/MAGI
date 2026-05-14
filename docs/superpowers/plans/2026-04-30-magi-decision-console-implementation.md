@@ -10,17 +10,20 @@
 
 ---
 
-## 2026-05-08 当前实现同步
+## 2026-05-12 当前实现同步
 
 以下为当前代码已落地行为，优先级高于后文历史任务拆解描述：
 
 1. 裁决创建为异步链路
 - `POST /api/decision-sessions` 会先创建 `queued/running` 会话并返回，不等待三脑与 Core 完成。
-- 后端后台推进 `melchior -> balthasar -> casper -> core`，最终落到 `completed` 或 `failed`。
+- 后端后台推进 `context -> brains -> core`，最终落到 `completed` 或 `failed`。
+- `brains` 阶段会把三个大脑统一置为 `running`，随后通过 `Promise.all` 并行执行 `melchior/balthasar/casper`，不是串行执行。
 
 2. 会话模型已扩展处理态字段
 - `DecisionSession` 现包含 `processingStage` 与 `processingStatus`。
-- `BrainAnalysis` 现包含 `status`，用于显示 `pending/running/completed/failed`。
+- `processingStage` 当前取值为 `queued/brains/core/completed/failed`。
+- `processingStatus` 当前取值为 `pending/running/completed/failed`。
+- `BrainAnalysis` 现包含 `questionType`、`variables`、`status`，用于显示单脑上下文和 `pending/running/completed/failed`。
 
 3. LLM 超时与重试策略以环境变量为准
 - `DECISION_LLM_TIMEOUT_MS` 默认 `35000ms`。
@@ -36,6 +39,12 @@
 - `decision.llm.attempt` 日志包含 `responseFormatType/contentPreview/contentLength`。
 - `decision.brain.partial` 与 `decision.core.partial` 记录字段级降级原因。
 - `decision.pipeline.failed` 记录链路失败阶段与错误信息。
+
+6. 当前运行与限流实现
+- 根 `packageManager` 为 `pnpm@10.28.2`，根 `dev/build` 会先构建 `@magi/shared`。
+- 代码保留 Docker 编排，但本地开发可直接使用本机 MySQL；当前后端 `.env` 指向 `mysql://root:qwer1234@localhost:3306/magi?charset=utf8mb4`。
+- 接口层 `@fastify/rate-limit` 当前为全局 `120/minute`，未单独实现用户维度限流。
+- LLM 层 `Bottleneck` 当前为 `maxConcurrent: 3`、`minTime: 500ms`；裁决内部使用 `p-limit(5)` 包裹上下文、单脑和 Core 请求。
 
 说明：后续若继续使用本文档执行开发，请以“当前实现同步”小节为基线，后文任务清单视为历史计划，不再逐条代表现状。
 
@@ -112,12 +121,17 @@ magi-console/
 {
   "name": "magi-console",
   "private": true,
-  "packageManager": "pnpm@9.15.4",
+  "packageManager": "pnpm@10.28.2",
   "scripts": {
-    "dev": "pnpm --parallel dev",
-    "build": "pnpm -r build",
+    "dev": "pnpm --filter @magi/shared build && pnpm --parallel dev",
+    "dev:backend": "pnpm --filter @magi/shared build && pnpm --filter @magi/backend dev",
+    "dev:frontend": "pnpm --filter @magi/shared build && pnpm --filter @magi/frontend dev",
+    "build": "pnpm --filter @magi/shared build && pnpm -r --filter \"!@magi/shared\" build",
     "lint": "pnpm -r lint",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "stop": "lsof -ti:3001 -ti:10086 | xargs kill 2>/dev/null; echo 'stopped'",
+    "stop:backend": "lsof -ti:3001 | xargs kill 2>/dev/null; echo 'backend stopped'",
+    "stop:frontend": "lsof -ti:10086 | xargs kill 2>/dev/null; echo 'frontend stopped'"
   },
   "devDependencies": {
     "typescript": "^5.8.3"
@@ -268,6 +282,15 @@ export type BrainType = 'melchior' | 'balthasar' | 'casper';
 
 export type BrainStance = 'approve' | 'reject' | 'defer' | 'uncertain';
 
+export type DecisionProcessingStage =
+  | 'queued'
+  | 'brains'
+  | 'core'
+  | 'completed'
+  | 'failed';
+
+export type DecisionProcessingStatus = 'pending' | 'running' | 'completed' | 'failed';
+
 export interface DecisionVariable {
   name: string;
   value: string;
@@ -277,6 +300,9 @@ export interface DecisionVariable {
 
 export interface BrainAnalysis {
   brainType: BrainType;
+  questionType: QuestionType;
+  variables: DecisionVariable[];
+  status: DecisionProcessingStatus;
   stance: BrainStance;
   reason: string;
   focusPoints: string[];
@@ -297,6 +323,8 @@ export interface DecisionSession {
   userId: string;
   question: string;
   questionType: QuestionType;
+  processingStage: DecisionProcessingStage;
+  processingStatus: DecisionProcessingStatus;
   finalStatus: FinalStatus;
   summary: string;
   confidence: number;
@@ -304,6 +332,10 @@ export interface DecisionSession {
   analyses: BrainAnalysis[];
   decisionSummary: DecisionSummary;
   createdAt: string;
+}
+
+export interface CreateDecisionSessionRequest {
+  question: string;
 }
 ```
 
@@ -392,6 +424,8 @@ model DecisionSession {
   userId          String
   question        String   @db.Text
   questionType    String
+  processingStage String
+  processingStatus String
   finalStatus     String
   summary         String   @db.Text
   confidence      Float
@@ -420,6 +454,9 @@ const envSchema = z.object({
   SYSTEM_AI_BASE_URL: z.string().url(),
   SYSTEM_AI_MODEL: z.string().min(1),
   SYSTEM_AI_API_KEY: z.string().min(1),
+  DECISION_LLM_TIMEOUT_MS: z.coerce.number().int().positive().default(35000),
+  MELCHIOR_TIMEOUT_MS: z.coerce.number().int().positive().optional(),
+  FRONTEND_ORIGIN: z.string().url().default('http://localhost:3000'),
   PORT: z.coerce.number().default(3001),
 });
 
