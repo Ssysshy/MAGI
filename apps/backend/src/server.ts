@@ -6,4 +6,5 @@ const start = async (): Promise<void> => {
   await app.listen({ host: '0.0.0.0', port: env.PORT });
 };
 
+// 构建完app 开始启动服务
 void start();

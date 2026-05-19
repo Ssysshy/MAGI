@@ -35,6 +35,7 @@ const authPlugin: FastifyPluginAsync = async (app) => {
     const token = request.cookies.magi_session;
 
     if (!token) {
+      // 如果没有token 抛出错误 给到401错误码
       throw createUnauthorizedError();
     }
 

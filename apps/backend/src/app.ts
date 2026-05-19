@@ -29,15 +29,19 @@ export const buildApp = async (): Promise<FastifyInstance> => {
   });
 
   // 注册顺序保持为：跨域/基础中间件 -> 数据库 -> 鉴权 -> 业务路由。
+  // 注册 CORS（跨域资源共享）插件。允许来自 env.FRONTEND_ORIGIN 指定域名的前端请求访问这个后端 API，credentials: true 表示允许携带 Cookie / Authorization 头等凭证信息。
   await app.register(cors, {
     origin: env.FRONTEND_ORIGIN,
     credentials: true,
   });
+  // 注册 Cookie 插件，用于解析和设置 HTTP Cookie。secret 用于对签名 Cookie 进行签名/验证，这里复用了 JWT_SECRET 作为签名密钥。
   await app.register(cookie, { secret: env.JWT_SECRET });
+  // 注册全局限流插件。限制每个客户端 IP 在 1 分钟内最多发起 120 次请求，超出后返回 429 Too Many Requests，防止接口被刷。
   await app.register(rateLimit, {
     max: 120,
     timeWindow: '1 minute',
   });
+  // 注册 Prisma 数据库插件，将 Prisma Client 实例挂载到 Fastify 应用上，使后续所有路由都能通过 app.prisma 访问数据库。
   await app.register(prismaPlugin);
   await app.register(authPlugin);
   await app.register(authRoutes);
