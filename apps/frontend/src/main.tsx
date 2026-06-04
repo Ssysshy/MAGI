@@ -1,6 +1,6 @@
 import { createRoot } from 'react-dom/client';
 import { StrictMode } from 'react';
-import LoginPage from './pages/login/index';
+import App from './app';
 
 const container = document.getElementById('app');
 
@@ -8,7 +8,7 @@ if (container) {
   const root = createRoot(container);
   root.render(
     <StrictMode>
-      <LoginPage />
+      <App />
     </StrictMode>,
   );
 }
