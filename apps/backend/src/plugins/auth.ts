@@ -23,6 +23,20 @@ const createUnauthorizedError = (): Error & { statusCode: number } => {
   return error;
 };
 
+const getBearerToken = (authorizationHeader: string | undefined): string | null => {
+  if (!authorizationHeader) {
+    return null;
+  }
+
+  const [scheme, token] = authorizationHeader.split(' ');
+
+  if (scheme !== 'Bearer' || !token) {
+    return null;
+  }
+
+  return token;
+};
+
 const isSessionPayload = (payload: string | JwtPayload): payload is SessionPayload => (
   typeof payload !== 'string'
   && typeof payload.userId === 'string'
@@ -31,11 +45,10 @@ const isSessionPayload = (payload: string | JwtPayload): payload is SessionPaylo
 
 const authPlugin: FastifyPluginAsync = async (app) => {
   app.decorate('authenticate', async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
-    // 所有受保护接口都从 HttpOnly Cookie 读取会话，避免前端直接持有 token。
-    const token = request.cookies.magi_session;
+    // 优先读取 Authorization，兼容旧 Cookie 会话，保证 H5 和小程序都可访问。
+    const token = getBearerToken(request.headers.authorization) ?? request.cookies.magi_session;
 
     if (!token) {
-      // 如果没有token 抛出错误 给到401错误码
       throw createUnauthorizedError();
     }
 
@@ -54,7 +67,9 @@ const authPlugin: FastifyPluginAsync = async (app) => {
         select: { id: true },
       });
       if (!user) {
-        reply.clearCookie('magi_session', { path: '/' });
+        if (request.cookies.magi_session) {
+          reply.clearCookie('magi_session', { path: '/' });
+        }
         throw createUnauthorizedError();
       }
     } catch {

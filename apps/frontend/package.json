@@ -4,8 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "taro build --type h5 --watch",
-    "build": "taro build --type h5",
+    "dev": "pnpm dev:h5",
+    "dev:h5": "taro build --type h5 --watch",
+    "dev:weapp": "taro build --type weapp --watch",
+    "build": "pnpm build:h5",
+    "build:h5": "taro build --type h5",
+    "build:weapp": "taro build --type weapp",
     "lint": "tsc -p tsconfig.json --noEmit",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

@@ -30,6 +30,7 @@ pnpm-debug.log*
 .env
 .env.local
 .env.*.local
+.codegraph/
 
 # Local runtime output
 uploads/

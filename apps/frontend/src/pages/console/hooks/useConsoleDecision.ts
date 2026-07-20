@@ -33,14 +33,14 @@ export const useConsoleDecision = (): UseConsoleDecisionResult => {
   const [question, setQuestion] = useState<string>(DEFAULT_DECISION.question);
   const [decision, setDecision] = useState<DecisionSession>(DEFAULT_DECISION);
   const [loading, setLoading] = useState<boolean>(false);
-  const pollingTimerRef = useRef<number | null>(null);
+  const pollingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollingRef = useRef<boolean>(false);
 
   const stopPolling = useCallback((): void => {
     pollingRef.current = false;
 
     if (pollingTimerRef.current !== null) {
-      window.clearTimeout(pollingTimerRef.current);
+      clearTimeout(pollingTimerRef.current);
       pollingTimerRef.current = null;
     }
   }, []);
@@ -74,7 +74,7 @@ export const useConsoleDecision = (): UseConsoleDecisionResult => {
         return;
       }
 
-      pollingTimerRef.current = window.setTimeout((): void => {
+      pollingTimerRef.current = setTimeout((): void => {
         void poll();
       }, 2000);
     };

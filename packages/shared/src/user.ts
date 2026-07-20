@@ -7,6 +7,11 @@ export interface CurrentUser {
   canConfigureAiProvider: boolean;
 }
 
+export interface AuthResult {
+  accessToken: string;
+  user: CurrentUser;
+}
+
 export type AiProviderMode = 'system' | 'custom';
 
 export interface UserCapabilities {

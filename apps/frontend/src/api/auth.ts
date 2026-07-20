@@ -1,24 +1,36 @@
-import type { CurrentUser, UserCapabilities } from '@magi/shared';
+import type { AuthResult, CurrentUser, UserCapabilities } from '@magi/shared';
 import { requestJson } from './http';
+import { clearAccessToken, setAccessToken } from '../utils/auth-token';
 
 export interface AuthPayload {
   email: string;
   password: string;
 }
 
-export const login = (payload: AuthPayload): Promise<CurrentUser> => requestJson('/api/auth/login', {
+const saveAuthResult = (result: AuthResult): AuthResult => {
+  setAccessToken(result.accessToken);
+  return result;
+};
+
+export const login = async (payload: AuthPayload): Promise<AuthResult> => saveAuthResult(await requestJson<AuthResult>('/api/auth/login', {
   method: 'POST',
   data: payload,
-});
+}));
 
-export const register = (payload: AuthPayload): Promise<CurrentUser> => requestJson('/api/auth/register', {
+export const register = async (payload: AuthPayload): Promise<AuthResult> => saveAuthResult(await requestJson<AuthResult>('/api/auth/register', {
   method: 'POST',
   data: payload,
-});
+}));
 
-export const logout = (): Promise<{ ok: true }> => requestJson('/api/auth/logout', {
-  method: 'POST',
-});
+export const logout = async (): Promise<{ ok: true }> => {
+  try {
+    return await requestJson<{ ok: true }>('/api/auth/logout', {
+      method: 'POST',
+    });
+  } finally {
+    clearAccessToken();
+  }
+};
 
 export const getCurrentUser = (): Promise<CurrentUser> => requestJson('/api/me');
 

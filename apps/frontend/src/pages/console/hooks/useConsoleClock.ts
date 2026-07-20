@@ -13,9 +13,9 @@ export const useConsoleClock = (): string => {
 
   useEffect((): (() => void) => {
     // 主控台只需要分钟级刷新，避免秒级计时造成无意义重渲染。
-    const timer = window.setInterval((): void => setClock(getClockText()), 30000);
+    const timer = setInterval((): void => setClock(getClockText()), 30000);
 
-    return (): void => window.clearInterval(timer);
+    return (): void => clearInterval(timer);
   }, []);
 
   return clock;

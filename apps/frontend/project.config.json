@@ -1,0 +1,15 @@
+{
+  "appid": "touristappid",
+  "projectname": "magi-console",
+  "compileType": "miniprogram",
+  "miniprogramRoot": "dist/weapp",
+  "srcMiniprogramRoot": "dist/weapp",
+  "setting": {
+    "urlCheck": false,
+    "es6": true,
+    "enhance": true,
+    "postcss": true,
+    "minified": true
+  },
+  "condition": {}
+}

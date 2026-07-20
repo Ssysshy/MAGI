@@ -1,18 +1,18 @@
 import argon2 from 'argon2';
 import jwt from 'jsonwebtoken';
 import type { PrismaClient, User } from '@prisma/client';
+import type { AuthResult } from '@magi/shared';
 import { env } from '../../config/env.js';
 import type { AuthInput } from './auth.schema.js';
 
-export interface AuthSession {
+export interface AuthSession extends AuthResult {
   token: string;
-  user: Pick<User, 'id' | 'email' | 'role' | 'canConfigureAiProvider'>;
 }
 
-const toPublicUser = (user: User): AuthSession['user'] => ({
+const toPublicUser = (user: User): AuthResult['user'] => ({
   id: user.id,
   email: user.email,
-  role: user.role,
+  role: user.role as AuthResult['user']['role'],
   canConfigureAiProvider: user.canConfigureAiProvider,
 });
 
@@ -37,9 +37,11 @@ export const createAuthService = (prisma: PrismaClient) => {
           passwordHash: await argon2.hash(input.password),
         },
       });
+      const token = createToken(user.id);
 
       return {
-        token: createToken(user.id),
+        token,
+        accessToken: token,
         user: toPublicUser(user),
       };
     },
@@ -53,9 +55,11 @@ export const createAuthService = (prisma: PrismaClient) => {
         error.statusCode = 401;
         throw error;
       }
+      const token = createToken(user.id);
 
       return {
-        token: createToken(user.id),
+        token,
+        accessToken: token,
         user: toPublicUser(user),
       };
     },
