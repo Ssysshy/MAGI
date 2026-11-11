@@ -51,6 +51,8 @@ export const useConsoleDecision = (): UseConsoleDecisionResult => {
     stopPolling();
     pollingRef.current = true;
 
+    let consecutiveErrors = 0;
+
     const poll = async (): Promise<void> => {
       if (!pollingRef.current) {
         return;
@@ -63,6 +65,7 @@ export const useConsoleDecision = (): UseConsoleDecisionResult => {
           return;
         }
 
+        consecutiveErrors = 0;
         setDecision(session);
 
         if (session.processingStatus === 'completed' || session.processingStatus === 'failed') {
@@ -70,12 +73,18 @@ export const useConsoleDecision = (): UseConsoleDecisionResult => {
           setLoading(false);
           return;
         }
-      } catch {
-        stopPolling();
-        setLoading(false);
-        return;
+      } catch (error) {
+        const statusCode = getHttpStatusCode(error);
+        consecutiveErrors += 1;
+        if (statusCode === 401 || statusCode === 403 || consecutiveErrors >= 3) {
+          stopPolling();
+          setLoading(false);
+          void Taro.showToast({ title: '获取裁决状态失败，请稍后重试', icon: 'none' });
+          return;
+        }
       }
 
+      if (!pollingRef.current) return;
       pollingTimerRef.current = window.setTimeout((): void => {
         void poll();
       }, 2000);

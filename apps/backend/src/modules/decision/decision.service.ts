@@ -16,6 +16,7 @@ import {
 import type { CreateDecisionSessionInput } from './decision.schema.js';
 import type { LlmConfig } from './llm-client.js';
 
+const PIPELINE_TIMEOUT_REASON = '裁决任务超时，请稍后重试';
 const PIPELINE_FAILED_REASON = '裁决链路执行失败，主控已拒绝裁决';
 const CRITICAL_VARIABLE_MISSING_REASON = '关键变量缺失，当前无法负责地下结论';
 const BRAIN_RUNNING_REASON: Record<BrainType, string> = {
@@ -161,7 +162,10 @@ export const createDecisionService = (prisma: PrismaClient) => {
     sessionId: string,
     userId: string,
     question: string,
+    createdAt: Date,
   ): Promise<void> => {
+    const startedAt = Date.now();
+    const signal = AbortSignal.timeout(Math.max(1, createdAt.getTime() + env.DECISION_TASK_TIMEOUT_MS - startedAt));
     const state = createPendingDecision(userId, question);
     const obviousRiskQuestion = isObviousRiskQuestion(question);
 
@@ -169,10 +173,13 @@ export const createDecisionService = (prisma: PrismaClient) => {
       const config = await getLlmConfig(userId);
 
       state.processingStage = 'melchior';
-      state.analyses = markBrainRunning(state.analyses, 'melchior');
+      state.analyses = markBrainRunning(
+        markBrainRunning(markBrainRunning(state.analyses, 'melchior'), 'balthasar'),
+        'casper',
+      );
 
-      await prisma.decisionSession.update({
-        where: { id: sessionId },
+      await prisma.decisionSession.updateMany({
+        where: { id: sessionId, processingStatus: 'running' },
         data: {
           processingStage: state.processingStage,
           processingStatus: state.processingStatus,
@@ -180,15 +187,55 @@ export const createDecisionService = (prisma: PrismaClient) => {
         },
       });
 
-      try {
-        const melchiorDecision = await analyzeWithMelchior({ question, config });
-        state.questionType = melchiorDecision.questionType;
-        state.variables = melchiorDecision.variables;
-        state.analyses = replaceAnalysis(state.analyses, melchiorDecision.analysis);
-      } catch (error) {
-        state.analyses = replaceAnalysis(state.analyses, createBrainFailureResult('melchior', toBrainFailureReason(error)));
+      const brainTypes: Array<'balthasar' | 'casper'> = ['balthasar', 'casper'];
+      const [melchiorResult, ...analyses] = await Promise.all([
+        analyzeWithMelchior({ question, config, signal })
+          .then((result) => ({ result, error: null }))
+          .catch((error: unknown) => ({ result: null, error })),
+        ...brainTypes.map(async (brainType): Promise<BrainAnalysis> => {
+          try {
+            return await analyzeWithBrain(brainType, { question, config, signal });
+          } catch (error) {
+            return createBrainFailureResult(brainType, toBrainFailureReason(error));
+          }
+        }),
+      ] as const);
+      signal.throwIfAborted();
+      if (melchiorResult.result) {
+        state.questionType = melchiorResult.result.questionType;
+        state.variables = melchiorResult.result.variables;
+        state.analyses = replaceAnalysis(state.analyses, melchiorResult.result.analysis);
+      } else {
+        state.analyses = replaceAnalysis(
+          state.analyses,
+          createBrainFailureResult('melchior', toBrainFailureReason(melchiorResult.error)),
+        );
+      }
+      for (const analysis of analyses) {
+        state.analyses = replaceAnalysis(state.analyses, analysis);
       }
 
+      state.processingStage = 'core';
+
+      await prisma.decisionSession.updateMany({
+        where: { id: sessionId, processingStatus: 'running' },
+        data: {
+          questionType: state.questionType,
+          processingStage: state.processingStage,
+          variablesJson: toJsonValue(state.variables),
+          analysesJson: toJsonValue(state.analyses),
+        },
+      });
+
+      const coreDecision = await summarizeWithCore({
+        question,
+        questionType: state.questionType,
+        variables: state.variables,
+        analyses: state.analyses,
+        config,
+        signal,
+      });
+      signal.throwIfAborted();
       if (!obviousRiskQuestion && shouldRefuseForMissingVariables(state.variables)) {
         const refusedDecision = createRefusedDecision(
           userId,
@@ -198,8 +245,8 @@ export const createDecisionService = (prisma: PrismaClient) => {
           state.analyses,
         );
 
-        await prisma.decisionSession.update({
-          where: { id: sessionId },
+        await prisma.decisionSession.updateMany({
+          where: { id: sessionId, processingStatus: 'running' },
           data: {
             questionType: refusedDecision.questionType,
             processingStage: refusedDecision.processingStage,
@@ -216,69 +263,6 @@ export const createDecisionService = (prisma: PrismaClient) => {
         return;
       }
 
-      state.processingStage = 'balthasar';
-      state.analyses = markBrainRunning(state.analyses, 'balthasar');
-
-      await prisma.decisionSession.update({
-        where: { id: sessionId },
-        data: {
-          questionType: state.questionType,
-          processingStage: state.processingStage,
-          variablesJson: toJsonValue(state.variables),
-          analysesJson: toJsonValue(state.analyses),
-        },
-      });
-
-      try {
-        state.analyses = replaceAnalysis(state.analyses, await analyzeWithBrain('balthasar', {
-          question,
-          questionType: state.questionType,
-          variables: state.variables,
-          config,
-        }));
-      } catch (error) {
-        state.analyses = replaceAnalysis(state.analyses, createBrainFailureResult('balthasar', toBrainFailureReason(error)));
-      }
-
-      state.processingStage = 'casper';
-      state.analyses = markBrainRunning(state.analyses, 'casper');
-
-      await prisma.decisionSession.update({
-        where: { id: sessionId },
-        data: {
-          processingStage: state.processingStage,
-          analysesJson: toJsonValue(state.analyses),
-        },
-      });
-
-      try {
-        state.analyses = replaceAnalysis(state.analyses, await analyzeWithBrain('casper', {
-          question,
-          questionType: state.questionType,
-          variables: state.variables,
-          config,
-        }));
-      } catch (error) {
-        state.analyses = replaceAnalysis(state.analyses, createBrainFailureResult('casper', toBrainFailureReason(error)));
-      }
-
-      state.processingStage = 'core';
-
-      await prisma.decisionSession.update({
-        where: { id: sessionId },
-        data: {
-          processingStage: state.processingStage,
-          analysesJson: toJsonValue(state.analyses),
-        },
-      });
-
-      const coreDecision = await summarizeWithCore({
-        question,
-        questionType: state.questionType,
-        variables: state.variables,
-        analyses: state.analyses,
-        config,
-      });
       const forceReject = obviousRiskQuestion && hasRejectAnalysis(state.analyses);
       const finalStatus = forceReject ? 'rejected' : coreDecision.finalStatus;
       const summary = forceReject ? OBVIOUS_RISK_REJECT_SUMMARY : coreDecision.summary;
@@ -292,8 +276,8 @@ export const createDecisionService = (prisma: PrismaClient) => {
           }
         : coreDecision.decisionSummary;
 
-      await prisma.decisionSession.update({
-        where: { id: sessionId },
+      await prisma.decisionSession.updateMany({
+        where: { id: sessionId, processingStatus: 'running' },
         data: {
           questionType: state.questionType,
           processingStage: 'completed',
@@ -308,6 +292,7 @@ export const createDecisionService = (prisma: PrismaClient) => {
       });
     } catch (error) {
       console.error('[decision.pipeline.failed]', {
+        durationMs: Date.now() - startedAt,
         sessionId,
         userId,
         processingStage: state.processingStage,
@@ -315,20 +300,41 @@ export const createDecisionService = (prisma: PrismaClient) => {
         errorMessage: error instanceof Error ? error.message : String(error),
       });
 
-      await prisma.decisionSession.update({
-        where: { id: sessionId },
+      await prisma.decisionSession.updateMany({
+        where: { id: sessionId, processingStatus: 'running' },
         data: {
           processingStage: 'failed',
           processingStatus: 'failed',
           finalStatus: 'refused',
-          summary: PIPELINE_FAILED_REASON,
+          summary: signal.aborted ? PIPELINE_TIMEOUT_REASON : PIPELINE_FAILED_REASON,
           confidence: 0,
           variablesJson: toJsonValue(state.variables),
           analysesJson: toJsonValue(state.analyses),
-          summaryJson: toJsonValue(createPlaceholderDecisionSummary(PIPELINE_FAILED_REASON)),
+          summaryJson: toJsonValue(createPlaceholderDecisionSummary(signal.aborted ? PIPELINE_TIMEOUT_REASON : PIPELINE_FAILED_REASON)),
         },
       });
+    } finally {
+      console.info('[decision.pipeline.duration]', { sessionId, durationMs: Date.now() - startedAt });
     }
+  };
+
+  const expireStaleSessions = async (userId: string, id?: string): Promise<void> => {
+    await prisma.decisionSession.updateMany({
+      where: {
+        userId,
+        ...(id ? { id } : {}),
+        processingStatus: { in: ['pending', 'running'] },
+        createdAt: { lt: new Date(Date.now() - env.DECISION_TASK_TIMEOUT_MS) },
+      },
+      data: {
+        processingStage: 'failed',
+        processingStatus: 'failed',
+        finalStatus: 'refused',
+        summary: PIPELINE_TIMEOUT_REASON,
+        confidence: 0,
+        summaryJson: toJsonValue(createPlaceholderDecisionSummary(PIPELINE_TIMEOUT_REASON)),
+      },
+    });
   };
 
   return {
@@ -350,12 +356,15 @@ export const createDecisionService = (prisma: PrismaClient) => {
         },
       });
 
-      void runDecisionPipeline(session.id, userId, input.question);
+      void runDecisionPipeline(session.id, userId, input.question, session.createdAt).catch((error: unknown): void => {
+        console.error('[decision.pipeline.persistence.failed]', { sessionId: session.id, error });
+      });
 
       return toDecisionSession(session);
     },
 
     async list(userId: string): Promise<DecisionSession[]> {
+      await expireStaleSessions(userId);
       const sessions = await prisma.decisionSession.findMany({
         where: { userId },
         orderBy: { createdAt: 'desc' },
@@ -366,6 +375,7 @@ export const createDecisionService = (prisma: PrismaClient) => {
     },
 
     async get(userId: string, id: string): Promise<DecisionSession> {
+      await expireStaleSessions(userId, id);
       const session = await prisma.decisionSession.findFirstOrThrow({
         where: { id, userId },
       });

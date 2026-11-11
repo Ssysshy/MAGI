@@ -1,5 +1,4 @@
 import Bottleneck from 'bottleneck';
-import pLimit from 'p-limit';
 import { z } from 'zod';
 import type {
   BrainAnalysis,
@@ -13,7 +12,6 @@ import type {
 import { env } from '../../config/env.js';
 import { requestLlmJson, type LlmConfig } from './llm-client.js';
 
-const decisionLimit = pLimit(5);
 const llmLimiter = new Bottleneck({
   minTime: 500,
   maxConcurrent: 3,
@@ -672,45 +670,57 @@ const isLlmServiceError = (error: unknown): boolean => {
 const requestDecisionJson = async <T>(
   config: LlmConfig,
   messages: Array<{ role: 'system' | 'user'; content: string }>,
-  options?: { brainType?: 'melchior' | 'balthasar' | 'casper' | 'core'; timeoutMs?: number },
+  options?: { brainType?: 'melchior' | 'balthasar' | 'casper' | 'core'; timeoutMs?: number; signal?: AbortSignal },
 ): Promise<T> => {
   let lastError: unknown;
   const timeoutMs = options?.timeoutMs ?? DECISION_LLM_TIMEOUT_MS;
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
+    options?.signal?.throwIfAborted();
+    const queuedAt = Date.now();
+
     try {
-      return await llmLimiter.schedule(() => requestLlmJson<T>(config, messages, timeoutMs, {
-        brainType: options?.brainType ?? 'unknown',
-        attempts: 1,
-        onAttemptDone: (context): void => {
-          const payload = {
-            brainType: context.brainType,
-            attempt: attempt + 1,
-            durationMs: context.durationMs,
-            timeoutMs: context.timeoutMs,
-            httpStatus: context.httpStatus,
-            errorCode: context.errorCode,
-            model: context.model,
-            baseUrlHost: context.baseUrlHost,
-            responseFormatType: context.responseFormatType,
-            contentPreview: context.contentPreview,
-            contentLength: context.contentLength,
-          };
-
-          if (context.errorCode) {
-            console.warn('[decision.llm.attempt]', payload);
-            return;
-          }
-
-          console.info('[decision.llm.attempt]', payload);
-        },
-      }));
+      const scheduled = llmLimiter.schedule(() => {
+        options?.signal?.throwIfAborted();
+        const queueDurationMs = Date.now() - queuedAt;
+        return requestLlmJson<T>(config, messages, timeoutMs, {
+          brainType: options?.brainType ?? 'unknown',
+          attempts: 1,
+          signal: options?.signal,
+          onAttemptDone: (context): void => {
+            const payload = { ...context, attempt: attempt + 1, queueDurationMs };
+            if (context.errorCode) {
+              console.warn('[decision.llm.attempt]', payload);
+            } else {
+              console.info('[decision.llm.attempt]', payload);
+            }
+          },
+        });
+      });
+      if (!options?.signal) {
+        return await scheduled;
+      }
+      const signal = options.signal;
+      return await new Promise<T>((resolve, reject): void => {
+        const onAbort = (): void => reject(signal.reason);
+        signal.addEventListener('abort', onAbort, { once: true });
+        if (signal.aborted) onAbort();
+        scheduled.then(resolve, reject).finally((): void => signal.removeEventListener('abort', onAbort));
+      });
     } catch (error) {
       lastError = error;
-
-      if (!isLlmServiceError(error) || attempt === 1) {
+      options?.signal?.throwIfAborted();
+      const status = getLlmHttpStatus(error);
+      if (attempt === 1 || !(status === 429 || (status !== null && status >= 500))) {
         throw error;
       }
+      await new Promise<void>((resolve, reject): void => {
+        const signal = options?.signal;
+        const onAbort = (): void => { clearTimeout(timer); reject(signal?.reason); };
+        const timer = setTimeout((): void => { signal?.removeEventListener('abort', onAbort); resolve(); }, 500 + Math.floor(Math.random() * 500));
+        signal?.addEventListener('abort', onAbort, { once: true });
+        if (signal?.aborted) onAbort();
+      });
     }
   }
 
@@ -723,9 +733,8 @@ const requestDecisionJson = async <T>(
 
 interface BrainDecisionInput {
   question: string;
-  questionType: QuestionType;
-  variables: DecisionVariable[];
   config: LlmConfig;
+  signal?: AbortSignal;
 }
 
 interface MelchiorDecision {
@@ -854,8 +863,8 @@ export const classifyMelchiorMode = (question: string): MelchiorMode => (
 );
 
 export const analyzeWithMelchior = async (
-  input: Pick<BrainDecisionInput, 'question' | 'config'>,
-): Promise<MelchiorDecision> => decisionLimit(async (): Promise<MelchiorDecision> => {
+  input: BrainDecisionInput,
+): Promise<MelchiorDecision> => {
   const mode = classifyMelchiorMode(input.question);
 
   try {
@@ -864,7 +873,7 @@ export const analyzeWithMelchior = async (
         role: 'system',
         content: [
           '你是 Magi 的 Melchior，只负责逻辑、效率和条件完备性判断。',
-          '必须返回严格 JSON，不要 Markdown。',
+          '必须返回严格 JSON，不要 Markdown；文字表述简洁，保留必要信息。',
           '字段必须包含 questionType、variables、analysis。',
           'variables 每项包含 name、value、isMissing、isCritical。',
           '必须返回至少 1 个变量；如果问题属于公共规则或基础安全判断，可以直接返回通用默认变量，不允许返回空数组。',
@@ -882,6 +891,7 @@ export const analyzeWithMelchior = async (
     ], {
       brainType: 'melchior',
       timeoutMs: MELCHIOR_LLM_TIMEOUT_MS,
+      signal: input.signal,
     });
     return buildMelchiorDecision(input.question, result, mode);
   } catch (error) {
@@ -891,19 +901,19 @@ export const analyzeWithMelchior = async (
 
     throw error;
   }
-});
+};
 
 export const analyzeWithBrain = async (
   brainType: Exclude<BrainType, 'melchior'>,
   input: BrainDecisionInput,
-): Promise<BrainAnalysis> => decisionLimit(async (): Promise<BrainAnalysis> => {
+): Promise<BrainAnalysis> => {
   try {
     const result = await requestDecisionJson<unknown>(input.config, [
       {
         role: 'system',
         content: [
           `你是 Magi 的 ${brainType.toUpperCase()}，职责是 ${BRAIN_ROLES[brainType]}。`,
-          '必须返回严格 JSON，不要 Markdown。',
+          '必须返回严格 JSON，不要 Markdown；文字表述简洁，保留必要信息。',
           '字段必须包含 stance、reason、focusPoints、uncertainties。',
           '如果你的理由已经明确支持或反对，stance 必须同步返回 approve 或 reject，不要保守地返回 uncertain。',
           '只输出当前角色的独立判断，不要汇总最终裁决。',
@@ -911,15 +921,12 @@ export const analyzeWithBrain = async (
       },
       {
         role: 'user',
-        content: JSON.stringify({
-          question: input.question,
-          questionType: input.questionType,
-          variables: input.variables,
-        }),
+        content: JSON.stringify({ question: input.question }),
       },
     ], {
       brainType,
       timeoutMs: DECISION_LLM_TIMEOUT_MS,
+      signal: input.signal,
     });
 
     return buildBrainAnalysis(brainType, result);
@@ -930,7 +937,7 @@ export const analyzeWithBrain = async (
 
     throw error;
   }
-});
+};
 
 interface CoreDecisionInput {
   question: string;
@@ -938,18 +945,19 @@ interface CoreDecisionInput {
   variables: DecisionVariable[];
   analyses: BrainAnalysis[];
   config: LlmConfig;
+  signal?: AbortSignal;
 }
 
 export const summarizeWithCore = async (
   input: CoreDecisionInput,
-): Promise<Pick<DecisionDraft, 'finalStatus' | 'summary' | 'confidence' | 'decisionSummary'>> => decisionLimit(async () => {
+): Promise<Pick<DecisionDraft, 'finalStatus' | 'summary' | 'confidence' | 'decisionSummary'>> => {
   try {
     const result = await requestDecisionJson<unknown>(input.config, [
       {
         role: 'system',
         content: [
           '你是 Magi Core，只负责综合三脑结果输出最终裁决。',
-          '必须返回严格 JSON，不要 Markdown。',
+          '必须返回严格 JSON，不要 Markdown；文字表述简洁，保留必要信息。',
           '字段必须包含 finalStatus、summary、confidence、decisionSummary。',
           'finalStatus 只能是 approved、rejected、deferred、refused。',
           'decisionSummary 必须包含 rule、majorityOpinion、minorityOpinion、missingInformation、finalDecision。',
@@ -970,6 +978,7 @@ export const summarizeWithCore = async (
     ], {
       brainType: 'core',
       timeoutMs: DECISION_LLM_TIMEOUT_MS,
+      signal: input.signal,
     });
     const normalized = normalizeCoreDecision(result);
     const raw = toRecord(result);
@@ -1001,7 +1010,7 @@ export const summarizeWithCore = async (
 
     throw error;
   }
-});
+};
 
 export const hasCriticalMissingVariables = (variables: DecisionVariable[]): boolean => variables.some(
   (item: DecisionVariable): boolean => item.isMissing && item.isCritical,

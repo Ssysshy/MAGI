@@ -25,6 +25,7 @@ interface LlmRequestLogContext {
 }
 
 interface RequestLlmJsonOptions {
+  signal?: AbortSignal;
   attempts?: number;
   retryDelayBaseMs?: number;
   onAttemptDone?: (context: LlmRequestLogContext) => void;
@@ -179,7 +180,7 @@ export const requestLlmJson = async <T>(
           temperature: attempt === 0 ? 0.2 : 0,
           response_format: { type: responseFormatType },
         }),
-        signal: controller.signal,
+        signal: options?.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal,
       });
 
       if (!response.ok) {
