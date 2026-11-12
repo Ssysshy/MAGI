@@ -37,20 +37,20 @@ export const createAiProviderService = (prisma: PrismaClient) => ({
   async save(userId: string, input: SaveAiProviderConfigInput): Promise<MaskedAiProviderConfig> {
     const existingConfig = await prisma.aiProviderConfig.findUnique({ where: { userId } });
 
-    if (!existingConfig) {
-      if (!input.apiKey) {
-        const error = new Error('API_KEY_REQUIRED') as Error & { statusCode: number };
-        error.statusCode = 400;
-        throw error;
-      }
+    if ((!existingConfig || existingConfig.provider !== input.provider || existingConfig.baseUrl !== input.baseUrl) && !input.apiKey) {
+      const error = new Error('API_KEY_REQUIRED') as Error & { statusCode: number };
+      error.statusCode = 400;
+      throw error;
+    }
 
+    if (!existingConfig) {
       const config = await prisma.aiProviderConfig.create({
         data: {
           userId,
           provider: input.provider,
           baseUrl: input.baseUrl,
           model: input.model,
-          apiKeyEncrypted: encryptText(input.apiKey),
+          apiKeyEncrypted: encryptText(input.apiKey as string),
           enabled: input.enabled,
         },
       });
@@ -84,22 +84,17 @@ export const createAiProviderService = (prisma: PrismaClient) => ({
   },
 
   async getUsableConfig(userId: string): Promise<UsableAiProviderConfig | null> {
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      include: { aiProviderConfig: true },
-    });
+    const config = await prisma.aiProviderConfig.findUnique({ where: { userId } });
 
-    // 只有授权用户且显式启用个人配置时，裁决流程才会解密并使用个人 API。
-    if (user?.canConfigureAiProvider && user.aiProviderConfig?.enabled) {
+    if (config?.enabled && config.provider === 'deepseek' && config.baseUrl === 'https://api.deepseek.com') {
       return {
-        provider: user.aiProviderConfig.provider,
-        baseUrl: user.aiProviderConfig.baseUrl,
-        model: user.aiProviderConfig.model,
-        apiKey: decryptText(user.aiProviderConfig.apiKeyEncrypted),
+        provider: 'deepseek',
+        baseUrl: 'https://api.deepseek.com',
+        model: 'deepseek-flash',
+        apiKey: decryptText(config.apiKeyEncrypted),
       };
     }
 
-    // 返回 null 代表调用方应回退到系统 AI API。
     return null;
   },
 });

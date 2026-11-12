@@ -150,6 +150,12 @@ export const createDecisionService = (prisma: PrismaClient) => {
   const getLlmConfig = async (userId: string): Promise<LlmConfig> => {
     const customConfig = await aiProviderService.getUsableConfig(userId);
 
+    if (!customConfig && !env.SYSTEM_AI_API_KEY) {
+      const error = new Error('API_KEY_REQUIRED') as Error & { statusCode: number };
+      error.statusCode = 400;
+      throw error;
+    }
+
     return customConfig ?? {
       provider: env.SYSTEM_AI_PROVIDER,
       baseUrl: env.SYSTEM_AI_BASE_URL,
@@ -163,6 +169,7 @@ export const createDecisionService = (prisma: PrismaClient) => {
     userId: string,
     question: string,
     createdAt: Date,
+    config: LlmConfig,
   ): Promise<void> => {
     const startedAt = Date.now();
     const signal = AbortSignal.timeout(Math.max(1, createdAt.getTime() + env.DECISION_TASK_TIMEOUT_MS - startedAt));
@@ -170,8 +177,6 @@ export const createDecisionService = (prisma: PrismaClient) => {
     const obviousRiskQuestion = isObviousRiskQuestion(question);
 
     try {
-      const config = await getLlmConfig(userId);
-
       state.processingStage = 'melchior';
       state.analyses = markBrainRunning(
         markBrainRunning(markBrainRunning(state.analyses, 'melchior'), 'balthasar'),
@@ -339,6 +344,7 @@ export const createDecisionService = (prisma: PrismaClient) => {
 
   return {
     async create(userId: string, input: CreateDecisionSessionInput): Promise<DecisionSession> {
+      const config = await getLlmConfig(userId);
       const draft = createPendingDecision(userId, input.question);
       const session = await prisma.decisionSession.create({
         data: {
@@ -356,7 +362,7 @@ export const createDecisionService = (prisma: PrismaClient) => {
         },
       });
 
-      void runDecisionPipeline(session.id, userId, input.question, session.createdAt).catch((error: unknown): void => {
+      void runDecisionPipeline(session.id, userId, input.question, session.createdAt, config).catch((error: unknown): void => {
         console.error('[decision.pipeline.persistence.failed]', { sessionId: session.id, error });
       });
 

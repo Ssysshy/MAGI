@@ -147,7 +147,7 @@ export const useConsoleDecision = (): UseConsoleDecisionResult => {
 
       setLoading(false);
       void Taro.showToast({
-        title: '裁决服务暂不可用',
+        title: statusCode === 400 ? '请先配置 DeepSeek API Key' : '裁决服务暂不可用',
         icon: 'none',
       });
     }

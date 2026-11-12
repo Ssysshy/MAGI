@@ -18,7 +18,7 @@ export const userRoutes = async (app: FastifyInstance): Promise<void> => {
       id: user.id,
       email: user.email,
       role: user.role === 'admin' ? 'admin' : 'user',
-      canConfigureAiProvider: user.canConfigureAiProvider,
+      canConfigureAiProvider: true,
     };
   });
 
@@ -28,10 +28,11 @@ export const userRoutes = async (app: FastifyInstance): Promise<void> => {
       where: { id: request.userId },
       include: { aiProviderConfig: true },
     });
-    const aiProviderMode: AiProviderMode = user.canConfigureAiProvider && user.aiProviderConfig?.enabled ? 'custom' : 'system';
+    const aiProviderMode: AiProviderMode = user.aiProviderConfig?.enabled && user.aiProviderConfig.provider === 'deepseek'
+      && user.aiProviderConfig.baseUrl === 'https://api.deepseek.com' ? 'custom' : 'system';
 
     return {
-      canConfigureAiProvider: user.canConfigureAiProvider,
+      canConfigureAiProvider: true,
       aiProviderMode,
     };
   });

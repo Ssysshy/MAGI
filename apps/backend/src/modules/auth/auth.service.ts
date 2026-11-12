@@ -13,7 +13,7 @@ const toPublicUser = (user: User): AuthSession['user'] => ({
   id: user.id,
   email: user.email,
   role: user.role,
-  canConfigureAiProvider: user.canConfigureAiProvider,
+  canConfigureAiProvider: true,
 });
 
 export const createAuthService = (prisma: PrismaClient) => {

@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
-import Taro from '@tarojs/taro';
-import { Button, Input, Switch, Text, View } from '@tarojs/components';
+import { Button, Input, Text, View } from '@tarojs/components';
 import { getAiProviderConfig, saveAiProviderConfig } from '../../api/ai-provider';
 import './index.less';
 
@@ -10,65 +9,66 @@ interface InputValueEvent {
   };
 }
 
-interface SwitchValueEvent {
-  detail: {
-    value: boolean;
-  };
-}
-
 const AiProviderPage = (): JSX.Element => {
-  const [provider, setProvider] = useState<string>('openai');
-  const [baseUrl, setBaseUrl] = useState<string>('https://api.openai.com/v1');
-  const [model, setModel] = useState<string>('gpt-4.1-mini');
   const [apiKey, setApiKey] = useState<string>('');
-  const [enabled, setEnabled] = useState<boolean>(false);
+  const [configured, setConfigured] = useState<boolean>(false);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [saving, setSaving] = useState<boolean>(false);
   const [status, setStatus] = useState<string>('');
 
   useEffect((): void => {
-    // 未授权用户访问该接口会返回 403，这里直接退回主控台。
     void getAiProviderConfig()
       .then((config): void => {
-        if (!config) {
-          return;
-        }
-
-        setProvider(config.provider);
-        setBaseUrl(config.baseUrl);
-        setModel(config.model);
-        setEnabled(config.enabled);
+        setConfigured(Boolean(config?.enabled && config.provider === 'deepseek' && config.baseUrl === 'https://api.deepseek.com'));
+        setLoading(false);
       })
-      .catch((): void => { void Taro.redirectTo({ url: '/pages/console/index' }); });
+      .catch((): void => {
+        setStatus('配置加载失败，请返回后重试');
+      });
   }, []);
 
+
   const handleSave = async (): Promise<void> => {
+    const nextApiKey = apiKey.trim();
+    if (!nextApiKey && !configured) {
+      setStatus('请填写 DeepSeek API Key');
+      return;
+    }
+    if (saving || loading) return;
+
+    setSaving(true);
     try {
-      const nextApiKey = apiKey.trim();
-      // apiKey 只在用户输入新值时提交，避免覆盖后端已有密钥。
       await saveAiProviderConfig({
-        provider,
-        baseUrl,
-        model,
-        enabled,
+        provider: 'deepseek',
+        baseUrl: 'https://api.deepseek.com',
+        model: 'deepseek-flash',
+        enabled: true,
         ...(nextApiKey ? { apiKey: nextApiKey } : {}),
       });
-      setStatus('SAVED');
+      setApiKey('');
+      setConfigured(true);
+      setStatus('保存成功');
     } catch {
-      setStatus('FORBIDDEN');
+      setStatus('保存失败，请稍后重试');
+    } finally {
+      setSaving(false);
     }
   };
 
   return (
     <View className="magi-page ai-provider-page">
-      <Text className="ai-title">AI PROVIDER</Text>
-      <Input className="ai-input" value={provider} onInput={(event: InputValueEvent): void => setProvider(event.detail.value)} />
-      <Input className="ai-input" value={baseUrl} onInput={(event: InputValueEvent): void => setBaseUrl(event.detail.value)} />
-      <Input className="ai-input" value={model} onInput={(event: InputValueEvent): void => setModel(event.detail.value)} />
-      <Input className="ai-input" password value={apiKey} placeholder="apiKey" onInput={(event: InputValueEvent): void => setApiKey(event.detail.value)} />
-      <View className="ai-switch">
-        <Text>ENABLED</Text>
-        <Switch checked={enabled} onChange={(event: SwitchValueEvent): void => setEnabled(event.detail.value)} />
-      </View>
-      <Button className="ai-button" onClick={handleSave}>SAVE</Button>
+      <Text className="ai-title">DEEPSEEK</Text>
+      <Text className="ai-label">API KEY</Text>
+      <Input
+        className="ai-input"
+        password
+        value={apiKey}
+        placeholder={configured ? '已配置，填写新密钥可替换' : '填写 DeepSeek API Key'}
+        onInput={(event: InputValueEvent): void => setApiKey(event.detail.value)}
+      />
+      <Button className="ai-button" disabled={loading || saving} onClick={(): void => { void handleSave(); }}>
+        {saving ? '保存中' : '保存'}
+      </Button>
       {status ? <Text className="ai-status">{status}</Text> : null}
     </View>
   );
